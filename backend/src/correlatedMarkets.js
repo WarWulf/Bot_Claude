@@ -11,10 +11,10 @@ function extractGroupKey(question) {
   for (const pattern of EXCLUSION_PATTERNS) {
     const m = q.match(pattern);
     if (m) {
-      const parts = m.slice(1).filter(Boolean).map(s => s.trim().toLowerCase());
-      const year = parts.find(p => /^\d{4}$/.test(p)) || '';
-      const event = parts.filter(p => !/^\d{4}$/.test(p) && p.length > 3).join(' ');
-      if (event.length > 5) return `${event}${year ? '_' + year : ''}`;
+      const parts = m.slice(1).filter(Boolean).map((s) => s.trim().toLowerCase());
+      const year = parts.find((p) => /^\d{4}$/.test(p)) || '';
+      const event = parts.filter((p) => !/^\d{4}$/.test(p) && p.length > 3).join(' ');
+      if (event.length > 5) return `${event}${year ? `_${year}` : ''}`;
     }
   }
   return null;
@@ -31,11 +31,13 @@ export function detectCorrelatedGroups(predictions) {
   const conflicts = [];
   for (const [key, members] of Object.entries(groups)) {
     if (members.length < 2) continue;
-    const allBuyYes = members.filter(m => m.direction === 'BUY_YES');
+    const allBuyYes = members.filter((m) => m.direction === 'BUY_YES');
     if (allBuyYes.length > 1) {
       const totalProb = allBuyYes.reduce((s, m) => s + Number(m.model_prob || 0), 0);
       conflicts.push({
-        group: key, issue: 'mutually_exclusive_buy_yes', members: allBuyYes,
+        group: key,
+        issue: 'mutually_exclusive_buy_yes',
+        members: allBuyYes,
         total_implied_prob: Number(totalProb.toFixed(4)),
         message: `${allBuyYes.length} BUY_YES in "${key}" — nur ein Gewinner möglich. Summe ${(totalProb * 100).toFixed(1)}% ist logisch unmöglich.`,
         recommendation: allBuyYes.sort((a, b) => Math.abs(b.edge) - Math.abs(a.edge))[0]?.question?.slice(0, 60) || '',
@@ -43,4 +45,31 @@ export function detectCorrelatedGroups(predictions) {
     }
   }
   return { groups: Object.keys(groups).length, conflicts };
+}
+
+export function filterCorrelatedPredictions(predictions = []) {
+  const correlations = detectCorrelatedGroups(predictions).conflicts;
+  if (!correlations.length) {
+    return { predictions, correlations: [], filtered: 0 };
+  }
+
+  const blockedIds = new Set();
+  for (const conflict of correlations) {
+    const sorted = [...(conflict.members || [])].sort((a, b) => Math.abs(Number(b.edge || 0)) - Math.abs(Number(a.edge || 0)));
+    for (const member of sorted.slice(1)) {
+      blockedIds.add(String(member.market_id));
+    }
+  }
+
+  const filteredPredictions = predictions.map((p) => {
+    if (!blockedIds.has(String(p.market_id))) return p;
+    return {
+      ...p,
+      actionable: false,
+      direction: 'NO_TRADE',
+      blocked_reason: 'correlated_market_group',
+    };
+  });
+
+  return { predictions: filteredPredictions, correlations, filtered: blockedIds.size };
 }
