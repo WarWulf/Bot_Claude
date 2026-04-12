@@ -50,6 +50,8 @@ if (!loadState().config) saveState(defaultState());
 // Auth routes + middleware
 registerAuthRoutes(app);
 
+import { detectCorrelatedGroups } from './correlatedMarkets.js';
+
 // --- Health ---
 app.get('/api/health', (_, res) => res.json({ status: 'ok', mode: 'modular' }));
 
@@ -86,9 +88,10 @@ app.post('/api/research/scan-recommendations', async (req, res) => {
 
 // --- Predict ---
 app.post('/api/predict/run', async (_, res) => { try { res.json({ ok: true, ...await runPredictStep(loadState()) }); } catch (e) { res.status(500).json({ ok: false, message: e.message }); } });
-app.get('/api/predict/status', (_, res) => { const s = loadState(); res.json({ summary: s.step3_summary || {}, predictions: (s.predictions || []).slice(0, 20), calibration: computeBrierCalibration(s.prediction_outcomes || []) }); });
+app.get('/api/predict/status', (_, res) => { const s = loadState(); res.json({ summary: s.step3_summary || {}, predictions: (s.predictions || []).slice(0, 20), correlations: s.correlations || [], calibration: computeBrierCalibration(s.prediction_outcomes || []) }); });
 app.post('/api/predict/outcomes', (req, res) => { const s = loadState(); const outcomes = recordPredictionOutcomes(s, req.body?.items || []); res.json({ ok: true, calibration: computeBrierCalibration(outcomes) }); });
 app.get('/api/predict/calibration', (_, res) => { const s = loadState(); res.json({ ok: true, ...computeBrierCalibration(s.prediction_outcomes || []) }); });
+app.get('/api/predict/correlations', (_, res) => { const s = loadState(); res.json({ ok: true, ...detectCorrelatedGroups(s.predictions || []) }); });
 
 // --- Execute ---
 app.post('/api/execute/run', async (_, res) => { try { res.json({ ok: true, ...await runExecutionStep(loadState()) }); } catch (e) { res.status(500).json({ ok: false, message: e.message }); } });

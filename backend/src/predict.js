@@ -2,6 +2,7 @@
 
 import { loadState, saveState } from './appState.js';
 import { fetchWithRetry, clamp01, extractFirstJsonObject, computeBrierCalibration, pushLiveComm } from './utils.js';
+import { filterCorrelatedPredictions } from './correlatedMarkets.js';
 
 export async function queryLlmProvider(providerName, providerCfg, globalCfg, prompt) {
   if (!providerCfg?.enabled) return null;
@@ -122,14 +123,19 @@ export async function runPredictStep(state = loadState()) {
   const avgEdge = predictions.length ? predictions.reduce((s, p) => s + Math.abs(Number(p.edge || 0)), 0) / predictions.length : 0;
   const calibration = computeBrierCalibration(state.prediction_outcomes || []);
 
-  state.predictions = predictions;
-  state.prediction_log = [...predictions, ...(state.prediction_log || [])].slice(0, 2000);
-  state.step3_summary = { completed_at: new Date().toISOString(), predicted_markets: predictions.length, avg_edge: Number(avgEdge.toFixed(4)), calibration_brier_score: calibration.brier_score, actionable_pct: Number((predictions.length ? (actionableCount / predictions.length) * 100 : 0).toFixed(1)) };
+  // Detect and filter correlated/mutually exclusive markets
+  const { predictions: filteredPredictions, correlations, filtered: correlationBlocked } = filterCorrelatedPredictions(predictions);
+  const finalActionable = filteredPredictions.filter((p) => p.actionable).length;
+
+  state.predictions = filteredPredictions;
+  state.correlations = correlations;
+  state.prediction_log = [...filteredPredictions, ...(state.prediction_log || [])].slice(0, 2000);
+  state.step3_summary = { completed_at: new Date().toISOString(), predicted_markets: filteredPredictions.length, avg_edge: Number(avgEdge.toFixed(4)), calibration_brier_score: calibration.brier_score, actionable_pct: Number((filteredPredictions.length ? (finalActionable / filteredPredictions.length) * 100 : 0).toFixed(1)), correlation_groups: correlations.length, correlation_blocked: correlationBlocked };
   state.predict_runs = state.predict_runs || [];
-  state.predict_runs.unshift({ time: new Date().toISOString(), summary: state.step3_summary, predictions: predictions.length });
+  state.predict_runs.unshift({ time: new Date().toISOString(), summary: state.step3_summary, predictions: filteredPredictions.length });
   state.predict_runs = state.predict_runs.slice(0, 100);
   saveState(state);
-  return { predictions, summary: state.step3_summary, runs: state.predict_runs };
+  return { predictions: filteredPredictions, correlations, summary: state.step3_summary, runs: state.predict_runs };
 }
 
 export function recordPredictionOutcomes(state, items = []) {
