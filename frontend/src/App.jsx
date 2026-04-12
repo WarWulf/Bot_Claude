@@ -103,6 +103,8 @@ export default function App(){
 
   const equityData=useMemo(()=>{if(!closedTrades.length)return[];let cum=0;return[{i:0,v:bankroll},...closedTrades.map((t,i)=>{cum+=Number(t.netPnlUsd||0);return{i:i+1,v:Math.round(bankroll+cum)};})];},[closedTrades,bankroll]);
   const pnlData=useMemo(()=>closedTrades.slice(-30).map((t,i)=>({i,pnl:Number(t.netPnlUsd||0),name:(t.title||'').slice(0,18)})),[closedTrades]);
+  const dailyPnlData=useMemo(()=>(nightlyStatus?.reviews||[]).slice(0,30).reverse().map(r=>({date:r.date?.slice(5)||'',pnl:Number(r.pnl||0)})),[nightlyStatus]);
+  const [exchangeBalance,setExchangeBalance]=useState(null);
 
   const srcStatus=useMemo(()=>{
     const rss=Boolean(cfg.research_source_rss!==false&&String(cfg.research_rss_feeds||'').trim());
@@ -170,6 +172,42 @@ export default function App(){
         <Card title="Wie funktioniert der Bot?" help="Der Bot arbeitet in 5 Schritten. Jeder baut auf dem vorherigen auf. Klicke sie von oben nach unten, oder nutze 'Full Pipeline' für alles auf einmal.">
           <div style={{display:'flex',gap:4,alignItems:'center',flexWrap:'wrap',marginBottom:8,fontSize:12}}>
             {['🔍 Scan','→','📰 Research','→','🎯 Predict','→','⚡ Execute','→','🛡️ Risk'].map((s,i)=><span key={i} style={{color:s==='→'?C.dim:C.text,fontWeight:s==='→'?400:500}}>{s}</span>)}
+          </div>
+        </Card>
+
+        {/* P&L Übersicht */}
+        <Card title="💰 Gewinn & Verlust" help="Aktuelle Performance auf einen Blick. Tägliches P&L aus den Nightly Reviews, Bankroll-Verlauf aus den Trades.">
+          <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:10}}>
+            <Metric label="Bankroll" value={`$${fmt(bankroll+totalPnl,0)}`} good={totalPnl>=0}/>
+            <Metric label="P&L" value={`${totalPnl>=0?'+':''}$${fmt(totalPnl,0)}`} good={totalPnl>=0}/>
+            <Metric label="Trades" value={`${closedTrades.length} ✓ / ${openTrades.length} offen`}/>
+            <Metric label="Win Rate" value={closedTrades.length?`${fmt(closedTrades.filter(t=>Number(t.netPnlUsd||0)>0).length/closedTrades.length*100,0)}%`:'-'} target="≥60%" good={closedTrades.length?closedTrades.filter(t=>Number(t.netPnlUsd||0)>0).length/closedTrades.length>=0.6:true}/>
+          </div>
+          {/* Bankroll Chart */}
+          {equityData.length>1&&<div style={{marginBottom:8}}>
+            <div style={{fontSize:11,color:C.muted,marginBottom:3}}>Bankroll-Verlauf</div>
+            <ResponsiveContainer width="100%" height={120}><AreaChart data={equityData}>
+              <defs><linearGradient id="eq2" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.cyan} stopOpacity={0.3}/><stop offset="100%" stopColor={C.cyan} stopOpacity={0}/></linearGradient></defs>
+              <XAxis dataKey="i" tick={{fontSize:8,fill:C.muted}} axisLine={false} tickLine={false}/><YAxis tick={{fontSize:8,fill:C.muted}} axisLine={false} tickLine={false} tickFormatter={v=>`$${v}`}/>
+              <Tooltip content={<ChartTip/>}/><Area type="monotone" dataKey="v" stroke={C.cyan} fill="url(#eq2)" strokeWidth={2} name="Bankroll"/>
+            </AreaChart></ResponsiveContainer>
+          </div>}
+          {/* Tägliches P&L Chart */}
+          {dailyPnlData.length>1&&<div>
+            <div style={{fontSize:11,color:C.muted,marginBottom:3}}>Tägliches P&L (aus Nightly Reviews)</div>
+            <ResponsiveContainer width="100%" height={100}><BarChart data={dailyPnlData}>
+              <XAxis dataKey="date" tick={{fontSize:8,fill:C.muted}} axisLine={false} tickLine={false}/>
+              <YAxis tick={{fontSize:8,fill:C.muted}} axisLine={false} tickLine={false} tickFormatter={v=>`$${v}`}/>
+              <Tooltip content={<ChartTip/>}/>
+              <Bar dataKey="pnl" name="Tages-P&L" radius={[2,2,0,0]}>{dailyPnlData.map((e,i)=><Cell key={i} fill={e.pnl>=0?C.green:C.red}/>)}</Bar>
+            </BarChart></ResponsiveContainer>
+          </div>}
+          {!equityData.length&&!dailyPnlData.length&&<div style={{color:C.muted,fontSize:12}}>Noch keine Trades oder Nightly Reviews. Starte die Pipeline.</div>}
+          {/* Balance Sync */}
+          <div style={{display:'flex',gap:6,marginTop:8,alignItems:'center'}}>
+            <Btn onClick={()=>act('balance',async()=>{const r=await apiFetch('/api/balance');const p=await r.json();setExchangeBalance(p);if(p.balances?.kalshi?.balance!=null)setMsg(`✅ Kalshi Balance: $${p.balances.kalshi.balance.toFixed(2)}`);else setMsg('⚠️ Kalshi Balance nicht verfügbar (API-Key nötig)');})} busy={busy.balance} help="Holt die aktuelle Balance von Kalshi">🏦 Balance von Börse laden</Btn>
+            {exchangeBalance?.balances?.kalshi?.balance!=null&&<span style={{fontSize:11,...mono,color:C.green}}>Kalshi: ${fmt(exchangeBalance.balances.kalshi.balance,2)} (verfügbar: ${fmt(exchangeBalance.balances.kalshi.available,2)})</span>}
+            {exchangeBalance?.balances?.kalshi?.error&&<span style={{fontSize:11,...mono,color:C.red}}>Fehler: {exchangeBalance.balances.kalshi.error}</span>}
           </div>
         </Card>
 
@@ -413,7 +451,8 @@ export default function App(){
               {key:'daily_loss_limit_pct',label:'Daily Loss Limit',rec:0.15,desc:'Max Tagesverlust bevor der Bot pausiert.',why:'15% verhindert Katastrophen-Tage.'},
               {key:'paper_trade_risk_pct',label:'Paper Trade Risk %',rec:0.02,desc:'Positions-Größe im Paper Mode (% des Bankrolls).',why:'2% pro Paper-Trade.'},
               {key:'top_n',label:'Top N',rec:10,desc:'Wie viele Märkte pro Scan in die Pipeline gehen.',why:'10 ist ein guter Kompromiss.'},
-              {key:'auto_running',label:'Auto-Pipeline',rec:false,desc:'Wenn AN: läuft die komplette Pipeline (Scan→Research→Predict→Execute→Risk→Learn) automatisch alle X Minuten.',why:'Erst einschalten wenn du die Pipeline manuell getestet hast!',type:'bool'},
+              {key:'auto_running',label:'Auto-Pipeline',rec:false,desc:'Wenn AN: läuft die komplette Pipeline automatisch alle X Minuten.',why:'Erst einschalten wenn du manuell getestet hast!',type:'bool'},
+              {key:'auto_sync_bankroll',label:'Bankroll von Börse synchen',rec:false,desc:'Wenn AN: holt der Bot bei jedem Balance-Check die Bankroll automatisch von Kalshi.',why:'Nur einschalten wenn Kalshi API-Key gesetzt und korrekt ist.',type:'bool'},
             ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
           </Card>
           {/* Scanner */}

@@ -192,6 +192,48 @@ app.get('/api/connection/test', async (_, res) => { const cfg = loadState().conf
 app.get('/api/connection/test/polymarket', async (_, res) => { const r = await runPolymarketConnectionTest(loadState().config || {}); res.status(r.reachable ? 200 : 503).json({ ok: r.reachable, ...r }); });
 app.get('/api/connection/test/kalshi', async (_, res) => { const r = await runKalshiConnectionTest(loadState().config || {}); res.status(r.reachable ? 200 : 503).json({ ok: r.reachable, ...r }); });
 
+// Exchange balance fetching
+app.get('/api/balance', async (_, res) => {
+  const state = loadState();
+  const cfg = state.config || {};
+  const balances = { polymarket: null, kalshi: null, total: null };
+
+  // Kalshi balance
+  try {
+    const ka = buildKalshiAuthHeaders('/trade-api/v2/portfolio/balance');
+    if (ka['KALSHI-ACCESS-KEY']) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+      const resp = await fetch('https://trading-api.kalshi.com/trade-api/v2/portfolio/balance', { headers: ka, signal: controller.signal });
+      clearTimeout(timer);
+      if (resp.ok) {
+        const data = await resp.json();
+        balances.kalshi = { balance: Number(data.balance || 0) / 100, available: Number(data.available_balance || 0) / 100, payout: Number(data.payout || 0) / 100 };
+      }
+    }
+  } catch (e) { balances.kalshi = { error: String(e.message || e).slice(0, 100) }; }
+
+  // Polymarket - would need web3 wallet balance check
+  // For now we track it from the state
+  balances.polymarket = { note: 'Polymarket Balance braucht Web3 Wallet-Abfrage. Wird über Paper-Trading getrackt.' };
+
+  // Total from Kalshi if available, otherwise from state
+  const kalshiBal = balances.kalshi?.balance;
+  if (kalshiBal != null && !balances.kalshi?.error) {
+    balances.total = kalshiBal;
+    // Auto-sync bankroll if configured
+    if (cfg.auto_sync_bankroll && kalshiBal > 0) {
+      state.config.bankroll = kalshiBal;
+      logLine(state, 'info', `bankroll auto-synced from Kalshi: $${kalshiBal.toFixed(2)}`);
+      saveState(state);
+    }
+  } else {
+    balances.total = Number(cfg.bankroll || 0);
+  }
+
+  res.json({ ok: true, balances, synced: Boolean(cfg.auto_sync_bankroll && kalshiBal > 0) });
+});
+
 app.get('/api/sources/test', async (_, res) => {
   const cfg = loadState().config || {};
   const results = {};
@@ -289,13 +331,6 @@ app.post('/api/run-once', async (_, res) => {
   res.json({ ok: true, signals: state.signals.length, trades_added: tradesAdded });
 });
 
-// --- Start ---
-ensureScanScheduler();
-ensurePipelineScheduler();
-applyWebsocketConfig();
-setInterval(flushWsTicksBuffer, 2000);
-app.listen(port, () => console.log(`Backend listening on http://0.0.0.0:${port}`));
-
 // Auto-pipeline: runs full pipeline every scan interval (if auto_running enabled)
 let pipelineTimer = null;
 function ensurePipelineScheduler() {
@@ -311,13 +346,19 @@ function ensurePipelineScheduler() {
     try {
       logLine(s, 'info', 'auto-pipeline started'); saveState(s);
       await runSkillPipeline({ runScan: true, runResearch: true, runPredict: true, runExecute: true, runRisk: true });
-      // After pipeline, run compound/learning step
       await runCompoundStep();
     } catch (e) {
       const s2 = loadState(); logLine(s2, 'error', `auto-pipeline failed: ${e.message}`); saveState(s2);
     }
   }, everyMs);
 }
+
+// --- Start ---
+ensureScanScheduler();
+ensurePipelineScheduler();
+applyWebsocketConfig();
+setInterval(flushWsTicksBuffer, 2000);
+app.listen(port, () => console.log(`Backend listening on http://0.0.0.0:${port}`));
 
 // Compound/Learning step: analyze results and write lessons
 async function runCompoundStep() {
