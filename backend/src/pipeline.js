@@ -45,14 +45,14 @@ export function runStep1SelfTest(state = loadState()) {
   const ranked = scanAndRankMarkets(sample, cfg);
   const readiness = computeStep1Readiness(state);
   const checks = [
-    { key: 'scheduler_config_valid', ok: Number(cfg.scan_interval_minutes || 0) >= 5 && Number(cfg.scan_interval_minutes || 0) <= 60 },
-    { key: 'breaker_config_valid', ok: Number(cfg.scanner_breaker_threshold || 0) >= 1 && Number(cfg.scanner_breaker_cooldown_sec || 0) >= 30 },
-    { key: 'scan_pipeline_ranked', ok: Array.isArray(ranked) && ranked.length > 0 },
-    { key: 'runtime_present', ok: typeof scannerRuntime.breakerUntil === 'number' },
-    { key: 'auth_configured_any', ok: Boolean(pm['x-pm-address'] && pm['x-pm-signature']) || Boolean(ka['KALSHI-ACCESS-KEY'] && ka['KALSHI-ACCESS-SIGNATURE']) || (state.scan_results || []).length > 0 },
-    { key: 'recent_scan_fresh', ok: readiness.fresh_scan },
-    { key: 'tradeable_target_reached', ok: readiness.tradeable_count >= readiness.min_tradeable_target },
-    { key: 'breaker_closed', ok: readiness.breaker_closed }
+    { key: 'scheduler_config_valid', ok: Number(cfg.scan_interval_minutes || 0) >= 5 && Number(cfg.scan_interval_minutes || 0) <= 60, desc: 'Scan-Intervall zwischen 5 und 60 Minuten' },
+    { key: 'breaker_config_valid', ok: Number(cfg.scanner_breaker_threshold || 0) >= 1 && Number(cfg.scanner_breaker_cooldown_sec || 0) >= 30, desc: 'Circuit Breaker korrekt konfiguriert' },
+    { key: 'scan_pipeline_ranked', ok: Array.isArray(ranked) && ranked.length > 0, desc: 'Scanner kann Märkte ranken (Test mit Beispieldaten)' },
+    { key: 'runtime_present', ok: typeof scannerRuntime.breakerUntil === 'number', desc: 'Scanner-Runtime initialisiert' },
+    { key: 'auth_configured_any', ok: Boolean(pm['x-pm-address'] && pm['x-pm-signature']) || Boolean(ka['KALSHI-ACCESS-KEY'] && ka['KALSHI-ACCESS-SIGNATURE']) || (state.scan_results || []).length > 0, desc: 'Mindestens eine Börse erreichbar oder Scan hat Ergebnisse' },
+    { key: 'recent_scan_fresh', ok: readiness.fresh_scan, desc: `Letzter Scan ist aktuell (nicht älter als ${Number(cfg.scan_interval_minutes || 15) * 2} Min)` },
+    { key: 'tradeable_target_reached', ok: readiness.tradeable_count >= readiness.min_tradeable_target, desc: `Mindestens ${readiness.min_tradeable_target} tradeable Märkte gefunden (aktuell: ${readiness.tradeable_count})` },
+    { key: 'breaker_closed', ok: readiness.breaker_closed, desc: 'Circuit Breaker ist geschlossen (Scanner nicht pausiert)' }
   ];
   return { ok: checks.every((c) => c.ok), passed: checks.filter((c) => c.ok).length, total: checks.length, checks, readiness };
 }

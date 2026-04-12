@@ -61,6 +61,7 @@ export default function App(){
   const [pwInput,setPwInput]=useState('');
   const [saving,setSaving]=useState(false);
   const [scanResult,setScanResult]=useState(null);
+  const [sourceTest,setSourceTest]=useState(null);
 
   const apiFetch=useCallback(async(path,opts={})=>{const h={...(opts.headers||{})};if(uiPw)h['x-ui-password']=uiPw;return fetch(path,{...opts,headers:h});},[uiPw]);
   const apiJson=useCallback(async(path,fb=null)=>{try{const r=await apiFetch(path);if(!r.ok)throw 0;return await r.json();}catch{return fb;}},[apiFetch]);
@@ -216,11 +217,54 @@ export default function App(){
             </div>;})}
           {step1Pct<100&&step1Pct>0&&<Tip>
             {step1Fails.includes('self_test')&&'Self-Test nicht bestanden. '}
-            {step1Fails.includes('tradeable_target')&&'Zu wenige Märkte gefunden — senke Min Volume (z.B. 200) in den Einstellungen. '}
-            {step1Fails.includes('scan_freshness')&&'Scan ist veraltet — klicke "Scan". '}
-            {!step1Fails.length&&'Scan nochmal starten.'}
+            {step1Fails.includes('tradeable_target')&&'Zu wenige Märkte — senke Min Volume (z.B. 200) in Einstellungen. '}
+            {step1Fails.includes('scan_freshness')&&'Scan veraltet — klicke Scan. '}
           </Tip>}
-          {scanResult?.self_test&&<div style={{fontSize:11,color:scanResult.self_test.ok?C.green:C.amber,...mono,marginTop:4}}>Letzter Self-Test: {scanResult.self_test.passed}/{scanResult.self_test.total} Checks bestanden{scanResult.self_test.ok?' ✅':''}</div>}
+        </Card>
+
+        {/* Self-Test Detail */}
+        {scanResult?.self_test&&<Card title={`Self-Test: ${scanResult.self_test.ok?'✅ Bestanden':`⚠️ ${scanResult.self_test.passed}/${scanResult.self_test.total}`}`}
+          help="Jeder Check prüft ob der Scanner korrekt funktioniert. Alle müssen grün sein für 100%.">
+          {(scanResult.self_test.checks||[]).map((c,i)=><div key={i} style={{display:'flex',alignItems:'flex-start',gap:6,padding:'3px 0',fontSize:11}}>
+            <span style={{color:c.ok?C.green:C.red,fontSize:13,lineHeight:1}}>{c.ok?'✅':'❌'}</span>
+            <div><span style={{color:c.ok?C.text:C.amber,fontWeight:500}}>{c.key.replace(/_/g,' ')}</span>
+              {c.desc&&<div style={{color:C.muted,fontSize:10}}>{c.desc}</div>}
+              {!c.ok&&<div style={{color:C.red,fontSize:10,...mono}}>→ {
+                c.key==='recent_scan_fresh'?'Starte einen neuen Scan.':
+                c.key==='tradeable_target_reached'?'Senke scanner_min_volume und scanner_min_liquidity in den Einstellungen (z.B. auf 200).':
+                c.key==='auth_configured_any'?'Trage API-Keys ein ODER starte einen Scan (Polymarket braucht keinen Key zum Lesen).':
+                c.key==='breaker_closed'?'Scanner hatte zu viele Fehler. Warte oder prüfe die Verbindung.':
+                'Prüfe die Einstellungen.'
+              }</div>}
+            </div>
+          </div>)}
+        </Card>}
+
+        {/* Quellen-Test */}
+        <Card title="Quellen testen" help="Testet ob RSS, Reddit etc. wirklich Daten liefern — nicht nur ob sie eingeschaltet sind.">
+          <div style={{display:'flex',gap:6,marginBottom:8}}>
+            <Btn onClick={()=>act('srcTest',async()=>{const r=await apiFetch('/api/sources/test');const p=await r.json();setSourceTest(p);setMsg(p.ok?'✅ Mindestens eine Quelle liefert Daten':'❌ Keine Quelle liefert Daten');})} busy={busy.srcTest}>🔌 Quellen jetzt testen</Btn>
+            <Btn onClick={()=>act('connTest',async()=>{const r=await apiFetch('/api/connection/test');const p=await r.json();setConnTest(p);setMsg(p.ok?'✅ Börse erreichbar':'❌ Keine Börse erreichbar');})} busy={busy.connTest}>🏦 Börsen testen</Btn>
+          </div>
+          {sourceTest&&<div style={{fontSize:11,...mono}}>
+            {Object.entries(sourceTest.sources||{}).map(([name,s])=><div key={name} style={{display:'flex',alignItems:'flex-start',gap:6,padding:'4px 0',borderBottom:`1px solid ${C.border}11`}}>
+              <span style={{color:s.working?C.green:s.enabled?C.red:C.dim,fontSize:13}}>{s.working?'✅':s.enabled?'❌':'⚪'}</span>
+              <div>
+                <span style={{fontWeight:500,color:s.working?C.green:s.enabled?C.red:C.muted}}>{name.toUpperCase()}</span>
+                {!s.enabled&&<span style={{color:C.dim}}> — deaktiviert in Einstellungen</span>}
+                {s.enabled&&!s.working&&<span style={{color:C.red}}> — keine Daten! {s.error||''}{s.key_missing?' (API-Key fehlt)':''}</span>}
+                {s.working&&name==='rss'&&<span style={{color:C.muted}}> — {(s.feeds_tested||[]).filter(f=>f.ok).length}/{(s.feeds_tested||[]).length} Feeds OK, {(s.feeds_tested||[]).reduce((sum,f)=>sum+(f.items||0),0)} Artikel gefunden</span>}
+                {s.working&&name==='reddit'&&<span style={{color:C.muted}}> — {s.posts_found} Posts gefunden</span>}
+                {s.working&&name==='newsapi'&&<span style={{color:C.muted}}> — {s.total_results} Ergebnisse</span>}
+                {s.working&&name==='gdelt'&&<span style={{color:C.muted}}> — {s.articles} Artikel</span>}
+                {name==='rss'&&(s.feeds_tested||[]).map((f,j)=><div key={j} style={{fontSize:10,color:f.ok?C.dim:C.red,marginLeft:8}}>{f.ok?'✓':'✗'} {f.url} {f.ok?`(${f.items} items)`:f.error||''}</div>)}
+              </div>
+            </div>)}
+          </div>}
+          {connTest&&<div style={{fontSize:11,...mono,marginTop:6}}>
+            <div style={{color:connTest.polymarket?.reachable?C.green:C.red}}>Polymarket: {connTest.polymarket?.reachable?`✅ erreichbar (${connTest.polymarket?.markets_sampled} Märkte)`:'❌ nicht erreichbar'}</div>
+            <div style={{color:connTest.kalshi?.reachable?C.green:C.red}}>Kalshi: {connTest.kalshi?.reachable?`✅ erreichbar (${connTest.kalshi?.markets_sampled} Märkte)`:'❌ nicht erreichbar'}</div>
+          </div>}
         </Card>
       </div>}
 
@@ -319,40 +363,79 @@ export default function App(){
           {/* Allgemein */}
           <Card title="💰 Allgemein" help="Grundeinstellungen für den Bot.">
             {[{key:'bankroll',label:'Bankroll ($)',rec:1000,desc:'Dein Kapital.',why:'Starte mit $100–500.'},
-              {key:'paper_mode',label:'Paper Mode',rec:true,desc:'AN = nur simuliert.',why:'IMMER zuerst Paper Mode!',type:'bool'},
-              {key:'kelly_fraction',label:'Kelly Fraction',rec:0.25,desc:'Wie aggressiv (0.25=vorsichtig).',why:'0.25 ist sicher.'},
-              {key:'min_edge',label:'Min Edge',rec:0.04,desc:'Mind. Vorteil zum Handeln.',why:'Unter 4% lohnt selten.'},
-              {key:'max_pos_pct',label:'Max Position %',rec:0.05,desc:'Max pro Trade.',why:'5% begrenzt Einzelverluste.'},
-              {key:'max_total_exposure_pct',label:'Max Exposure %',rec:0.5,desc:'Max alles zusammen.',why:'50% = nie mehr als Hälfte im Risiko.'},
-              {key:'max_drawdown_pct',label:'Max Drawdown',rec:0.08,desc:'Hard-Stop bei diesem Verlust.',why:'8% ist der Notfall-Stopp.'},
+              {key:'starting_bankroll',label:'Start-Bankroll ($)',rec:1000,desc:'Bankroll zu Beginn (für P&L-Berechnung).',why:'Gleich wie Bankroll setzen.'},
+              {key:'paper_mode',label:'Paper Mode',rec:true,desc:'AN = nur simuliert, kein echtes Geld.',why:'IMMER zuerst Paper Mode!',type:'bool'},
+              {key:'kelly_fraction',label:'Kelly Fraction',rec:0.25,desc:'Wie aggressiv gewettet wird. 0.25=vorsichtig, 1.0=sehr riskant.',why:'0.25 (Quarter-Kelly) ist der sichere Standard.'},
+              {key:'min_edge',label:'Min Edge',rec:0.04,desc:'Minimaler Vorteil zum Handeln. 0.04 = 4%.',why:'Unter 4% lohnt das Risiko selten.'},
+              {key:'max_pos_pct',label:'Max Position %',rec:0.05,desc:'Max Anteil des Bankrolls pro Trade.',why:'5% begrenzt Einzelverluste.'},
+              {key:'max_total_exposure_pct',label:'Max Exposure %',rec:0.5,desc:'Max Gesamtrisiko aller offenen Trades.',why:'50% = nie mehr als Hälfte im Risiko.'},
+              {key:'max_concurrent_positions',label:'Max Positionen',rec:15,desc:'Max gleichzeitig offene Trades.',why:'Mehr als 15 ist schwer zu überblicken.'},
+              {key:'max_drawdown_pct',label:'Max Drawdown',rec:0.08,desc:'Bei diesem Verlust vom Höchststand stoppt der Bot.',why:'8% ist der Notfall-Stopp. Ab 5% wird auf ⅛ Kelly reduziert.'},
+              {key:'daily_loss_limit_pct',label:'Daily Loss Limit',rec:0.15,desc:'Max Tagesverlust bevor der Bot pausiert.',why:'15% verhindert Katastrophen-Tage.'},
+              {key:'paper_trade_risk_pct',label:'Paper Trade Risk %',rec:0.02,desc:'Positions-Größe im Paper Mode (% des Bankrolls).',why:'2% pro Paper-Trade.'},
+              {key:'top_n',label:'Top N',rec:10,desc:'Wie viele Märkte pro Scan in die Pipeline gehen.',why:'10 ist ein guter Kompromiss.'},
             ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
           </Card>
           {/* Scanner */}
-          <Card title="🔍 Scanner" help="Steuert wie der Bot Märkte sucht.">
-            {[{key:'scanner_source',label:'Quelle',rec:'both',desc:'Wo suchen.',why:'both = beide Börsen.',type:'select',opts:['polymarket','kalshi','both']},
-              {key:'scan_interval_minutes',label:'Intervall (Min)',rec:15,desc:'Auto-Scan alle X Min.',why:'15 ist Standard.'},
-              {key:'scanner_min_volume',label:'Min Volume',rec:50000,desc:'Min Handelsvolumen.',why:'Zum Testen: 200. Produktion: 50000.'},
-              {key:'scanner_min_liquidity',label:'Min Liquidität',rec:10000,desc:'Min Orderbuch-Tiefe.',why:'Zum Testen: 200. Produktion: 10000.'},
-              {key:'scanner_max_days',label:'Max Tage',rec:30,desc:'Max Restlaufzeit.',why:'30 Tage Standard.'},
-              {key:'scanner_min_anomaly_score',label:'Min Anomalie',rec:1.2,desc:'Mind. Auffälligkeits-Score.',why:'Niedriger = mehr Märkte.'},
+          <Card title="🔍 Scanner" help="Steuert wie der Bot Märkte sucht und filtert.">
+            {[{key:'scanner_source',label:'Quelle',rec:'both',desc:'Wo suchen.',why:'both = Polymarket + Kalshi.',type:'select',opts:['polymarket','kalshi','both']},
+              {key:'scan_interval_minutes',label:'Intervall (Min)',rec:15,desc:'Wie oft automatisch gescannt wird.',why:'15 ist Standard.'},
+              {key:'scanner_min_volume',label:'Min Volume',rec:50000,desc:'Mindest-Handelsvolumen eines Marktes.',why:'Zum Testen: 200. Produktion: 50000.'},
+              {key:'scanner_min_liquidity',label:'Min Liquidität',rec:10000,desc:'Mindest-Orderbuch-Tiefe.',why:'Zum Testen: 200. Produktion: 10000.'},
+              {key:'scanner_max_days',label:'Max Tage',rec:30,desc:'Nur Märkte die in so vielen Tagen ablaufen.',why:'30 Tage ist Standard.'},
+              {key:'scanner_min_anomaly_score',label:'Min Anomalie Score',rec:1.2,desc:'Mindest-Auffälligkeits-Score.',why:'Niedriger = mehr Märkte, mehr Rauschen.'},
+              {key:'scanner_max_slippage_pct',label:'Max Slippage',rec:0.02,desc:'Max erlaubte Slippage beim Einstieg.',why:'2% schützt vor teuren Ausführungen.'},
+              {key:'scanner_max_spread',label:'Max Spread',rec:0.05,desc:'Spreads über diesem Wert werden als Anomalie geflaggt.',why:'5 Cent ist Standard.'},
+              {key:'scanner_price_move_threshold',label:'Preisbewegung-Schwelle',rec:0.1,desc:'Preisbewegungen über diesem Wert werden geflaggt.',why:'10% = deutliche Bewegung.'},
+              {key:'scanner_volume_spike_ratio',label:'Volume Spike Ratio',rec:2,desc:'Ab dem Vielfachen des 7-Tage-Schnitts gilt als Spike.',why:'2x = doppelt so viel wie normal.'},
+              {key:'min_market_price',label:'Min Marktpreis',rec:0.05,desc:'Märkte unter diesem Preis ignorieren.',why:'Unter 5¢ = extrem unwahrscheinliche Events.'},
+              {key:'max_market_price',label:'Max Marktpreis',rec:0.95,desc:'Märkte über diesem Preis ignorieren.',why:'Über 95¢ = fast sicher, kaum Gewinn.'},
+              {key:'step1_min_tradeable',label:'Min Tradeable',rec:5,desc:'Mindestanzahl handelbarer Märkte für Step-1-Bestanden.',why:'5 ist realistisch.'},
+              {key:'scanner_http_retries',label:'HTTP Retries',rec:2,desc:'Wiederholungsversuche bei API-Fehlern.',why:'2 fängt kurze Netzwerkprobleme.'},
+              {key:'scanner_http_timeout_ms',label:'HTTP Timeout (ms)',rec:8000,desc:'Max Wartezeit pro API-Request.',why:'8s verhindert Hänger.'},
+              {key:'scanner_breaker_threshold',label:'Breaker Schwelle',rec:3,desc:'Nach so vielen Fehlern pausiert der Scanner.',why:'Schützt gegen Endlosschleifen.'},
+              {key:'scanner_breaker_cooldown_sec',label:'Breaker Cooldown (s)',rec:300,desc:'Wartezeit nach Breaker-Auslösung.',why:'5 Min geben APIs Zeit.'},
+              {key:'scanner_active_from_utc',label:'Aktiv ab (UTC Stunde)',rec:0,desc:'Scanner nur in diesem Zeitfenster aktiv.',why:'0 = rund um die Uhr.'},
+              {key:'scanner_active_to_utc',label:'Aktiv bis (UTC Stunde)',rec:24,desc:'Scanner nur bis zu dieser Stunde aktiv.',why:'24 = rund um die Uhr.'},
+              {key:'scanner_history_retention_days',label:'History Tage',rec:14,desc:'Wie lange Preishistorie gespeichert wird.',why:'14 Tage für 7-Tage-Schnitt.'},
+              {key:'scanner_ws_enabled',label:'WebSocket aktiv',rec:false,desc:'Live-Orderbook Updates über WebSocket.',why:'Optional, nur für fortgeschrittene Setups.',type:'bool'},
             ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
           </Card>
           {/* Research */}
           <Card title="📰 Research Quellen" help="Woher der Bot Nachrichten holt. RSS und Reddit gehen sofort ohne API-Key.">
-            {[{key:'research_source_rss',label:'RSS Feeds',rec:true,desc:'Reuters, AP etc.',why:'Funktioniert sofort.',type:'bool'},
-              {key:'research_rss_feeds',label:'RSS URLs',rec:'',desc:'Komma-getrennte Feed-URLs.',why:'Schon voreingestellt.',type:'text'},
-              {key:'research_source_reddit',label:'Reddit',rec:true,desc:'Sucht in Subreddits.',why:'Kostenlos.',type:'bool'},
-              {key:'research_source_newsapi',label:'NewsAPI',rec:false,desc:'Braucht API-Key.',why:'Optional, kostenloser Tier.',type:'bool'},
-              {key:'research_newsapi_key',label:'NewsAPI Key',rec:'',desc:'Von newsapi.org.',why:'Nur wenn NewsAPI AN.',type:'password'},
-              {key:'research_source_gdelt',label:'GDELT',rec:false,desc:'Globale Event-DB.',why:'Kostenlos, manchmal langsam.',type:'bool'},
-              {key:'research_max_headlines',label:'Max Headlines',rec:80,desc:'Max gesammelte Headlines.',why:'80 reicht.'},
+            {[{key:'research_source_rss',label:'RSS Feeds',rec:true,desc:'Reuters, AP und andere Nachrichtenfeeds.',why:'Funktioniert sofort.',type:'bool'},
+              {key:'research_rss_feeds',label:'RSS URLs',rec:'',desc:'Komma-getrennte Feed-URLs.',why:'Schon voreingestellt mit Reuters.',type:'text'},
+              {key:'research_source_reddit',label:'Reddit',rec:true,desc:'Sucht in Reddit-Subreddits.',why:'Kostenlos, gut für Stimmung.',type:'bool'},
+              {key:'research_reddit_subreddits',label:'Reddit Subreddits',rec:'politics,worldnews,PredictionMarkets',desc:'Welche Subreddits durchsucht werden.',why:'Komma-getrennt.',type:'text'},
+              {key:'research_reddit_query',label:'Reddit Suchbegriff',rec:'election OR policy OR legal OR odds',desc:'Wonach in den Subreddits gesucht wird.',why:'Breite Begriffe für gute Abdeckung.',type:'text'},
+              {key:'research_source_newsapi',label:'NewsAPI',rec:false,desc:'Breitere Nachrichtensuche. Braucht API-Key.',why:'Optional, kostenloser Tier bei newsapi.org.',type:'bool'},
+              {key:'research_newsapi_key',label:'NewsAPI Key',rec:'',desc:'API-Schlüssel von newsapi.org.',why:'Nur nötig wenn NewsAPI AN.',type:'password'},
+              {key:'research_newsapi_query',label:'NewsAPI Suchbegriff',rec:'(polymarket OR kalshi OR prediction market)',desc:'Wonach in NewsAPI gesucht wird.',why:'Spezifisch für Prediction Markets.',type:'text'},
+              {key:'research_source_gdelt',label:'GDELT',rec:false,desc:'Globale Event-Datenbank.',why:'Kostenlos, manchmal langsam.',type:'bool'},
+              {key:'research_gdelt_query',label:'GDELT Suchbegriff',rec:'(polymarket OR kalshi OR prediction market)',desc:'Wonach in GDELT gesucht wird.',why:'Spezifisch für Prediction Markets.',type:'text'},
+              {key:'research_source_x',label:'X/Twitter RSS',rec:false,desc:'Twitter via RSS-Bridge Feeds.',why:'Schnelle Sentiment-Daten, braucht RSS-Bridge URLs.',type:'bool'},
+              {key:'research_x_rss_feeds',label:'X RSS Feed URLs',rec:'',desc:'Komma-getrennte RSS-Bridge URLs für Twitter.',why:'Z.B. über nitter oder RSS-Bridge.',type:'text'},
+              {key:'research_max_headlines',label:'Max Headlines',rec:80,desc:'Maximale Anzahl gesammelter Headlines.',why:'80 reicht für gute Abdeckung.'},
+              {key:'research_min_keyword_overlap',label:'Min Keyword Overlap',rec:2,desc:'Mindest-Wortübereinstimmung zwischen Headline und Markt.',why:'2 filtert Fehlzuordnungen. 1 = zu viele false positives.'},
+              {key:'research_min_credibility',label:'Min Credibility',rec:0.4,desc:'Mindest-Glaubwürdigkeit der Quelle (0-1).',why:'0.4 lässt die meisten durch. Höher = nur Premium-Quellen.'},
             ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
           </Card>
           {/* LLM */}
-          <Card title="🤖 KI-Provider" help="Für bessere Predictions. Ohne KI nutzt der Bot Heuristiken. Gemini hat kostenlosen Tier!">
+          <Card title="🤖 KI & Predict" help="Für bessere Predictions. Ohne KI nutzt der Bot Heuristiken. Gemini hat kostenlosen Tier!">
             {[{key:'llm_enabled',label:'LLM aktiv',rec:true,desc:'KI für Vorhersagen nutzen.',why:'Deutlich besser als ohne.',type:'bool'},
-              {key:'llm_timeout_ms',label:'Timeout (ms)',rec:12000,desc:'Max Wartezeit.',why:'12s Standard. Erhöhen bei Abbrüchen.'},
+              {key:'llm_timeout_ms',label:'LLM Timeout (ms)',rec:12000,desc:'Max Wartezeit pro LLM-Request.',why:'12s Standard. Erhöhen bei "aborted" Fehlern (z.B. 20000).'},
               {key:'llm_temperature',label:'Temperature',rec:0.1,desc:'0=konsistent, 1=kreativ.',why:'0.1 für stabile Schätzungen.'},
+              {key:'llm_max_tokens',label:'Max Tokens',rec:220,desc:'Max Antwortlänge der KI.',why:'220 reicht für JSON mit Wahrscheinlichkeit + Begründung.'},
+              {key:'llm_require_provider',label:'LLM zwingend',rec:false,desc:'Fehler wenn keine KI antwortet (statt Heuristik-Fallback).',why:'AUS lassen — Fallback ist besser als gar kein Signal.',type:'bool'},
+              {key:'step3_min_edge',label:'Predict Min Edge',rec:0.04,desc:'Minimum Edge für ein Predict-Signal.',why:'4% = nur handeln wenn deutlicher Vorteil.'},
+              {key:'step3_min_confidence',label:'Predict Min Confidence',rec:0.6,desc:'Minimum Confidence für ein Signal (0-1).',why:'0.6 = mäßig sicher. Höher = weniger aber bessere Signale.'},
+              {key:'model_prob_offset',label:'Model Prob Offset',rec:0,desc:'Manueller Offset auf alle Schätzungen.',why:'Normalerweise 0. Zum Kalibrieren nutzen.'},
+            ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
+            <div style={{fontSize:12,fontWeight:600,marginTop:8,marginBottom:4}}>LLM Gewichte (bestimmt wie stark jeder Provider zählt)</div>
+            {[{key:'llm_weight_openai',label:'OpenAI Gewicht',rec:0.35,desc:'Anteil von OpenAI im Ensemble.',why:'0.35 = 35%. Alle Gewichte zusammen müssen nicht genau 1.0 ergeben.'},
+              {key:'llm_weight_claude',label:'Claude Gewicht',rec:0.25,desc:'Anteil von Claude.',why:'0.25 = 25%.'},
+              {key:'llm_weight_gemini',label:'Gemini Gewicht',rec:0.2,desc:'Anteil von Gemini.',why:'0.20 = 20%.'},
+              {key:'llm_weight_ollama_cloud',label:'Ollama Gewicht',rec:0.2,desc:'Anteil von Ollama Cloud.',why:'0.20 = 20%.'},
             ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
             <div style={{fontSize:12,fontWeight:600,marginTop:8,marginBottom:6}}>Provider</div>
             {['openai','claude','gemini','ollama_cloud'].map(name=>{const p=state?.providers?.[name]||{};return<div key={name} style={{marginBottom:6,padding:'6px 8px',background:C.bg,borderRadius:5,border:`1px solid ${C.border}`}}>
@@ -380,6 +463,12 @@ export default function App(){
               <input placeholder="Key Secret" type="password" value={state?.providers?.kalshi?.key_secret||''} onChange={e=>setProvider('kalshi','key_secret',e.target.value)} style={{display:'block',width:'100%',padding:'4px 7px',borderRadius:4,border:`1px solid ${C.border}`,background:C.bg,color:C.text,fontSize:11,...mono,boxSizing:'border-box'}}/></div>
             <div style={{marginTop:8}}><Btn onClick={()=>act('connTest',async()=>{const r=await apiFetch('/api/connection/test');const p=await r.json();setConnTest(p);setMsg(p.ok?'✅ Verbindung OK':'❌ Keine Börse erreichbar');})} busy={busy.connTest}>🔌 Testen</Btn></div>
             {connTest&&<div style={{fontSize:10,...mono,marginTop:4,color:C.muted}}>PM: {connTest.polymarket?.reachable?'✅':'❌'} · Kalshi: {connTest.kalshi?.reachable?'✅':'❌'}</div>}
+          </Card>
+          {/* System */}
+          <Card title="🔧 System" help="Logging und sonstige Einstellungen.">
+            {[{key:'log_to_file',label:'Log in Datei',rec:true,desc:'Logs in tägliche Dateien schreiben.',why:'Wichtig für Debugging.',type:'bool'},
+              {key:'log_retention_days',label:'Log Aufbewahrung (Tage)',rec:14,desc:'Wie lange Log-Dateien behalten werden.',why:'14 Tage reicht. Ältere werden gelöscht.'},
+            ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
           </Card>
         </div>
         <div style={{textAlign:'center',marginTop:8}}><Btn onClick={save} busy={saving} variant="green">💾 Alle Einstellungen speichern</Btn></div>

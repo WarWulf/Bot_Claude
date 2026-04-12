@@ -77,6 +77,48 @@ app.get('/api/scan/live-log', (_, res) => { const latest = liveCommLog[0] || nul
 // --- Research ---
 app.post('/api/research/run', async (_, res) => { try { res.json({ ok: true, ...await runResearchStep() }); } catch (e) { res.status(500).json({ ok: false, message: e.message }); } });
 app.get('/api/research/status', (_, res) => { const s = loadState(); res.json({ summary: s.research_summary || {}, briefs: (s.research_briefs || []).slice(0, 20) }); });
+app.get('/api/research/test-sources', async (_, res) => {
+  const state = loadState(); const cfg = state.config || {}; const results = {};
+  // Test RSS
+  if (cfg.research_source_rss !== false) {
+    const feeds = String(cfg.research_rss_feeds || '').split(',').map(x => x.trim()).filter(Boolean);
+    results.rss = { configured: feeds.length > 0, feeds_count: feeds.length, tested: [] };
+    for (const feed of feeds.slice(0, 3)) {
+      try {
+        const r = await fetchWithRetry(feed, {}, { label: 'rss-test', retries: 0, timeoutMs: 6000 });
+        const text = await r.text();
+        const items = (text.match(/<item/gi) || []).length;
+        results.rss.tested.push({ url: feed.slice(0, 80), ok: true, items });
+      } catch (e) { results.rss.tested.push({ url: feed.slice(0, 80), ok: false, error: e.message }); }
+    }
+  } else { results.rss = { configured: false }; }
+  // Test Reddit
+  if (cfg.research_source_reddit !== false) {
+    try {
+      const r = await fetchWithRetry('https://www.reddit.com/r/PredictionMarkets/hot.json?limit=3', { headers: { 'User-Agent': 'tradingbot/test' } }, { label: 'reddit-test', retries: 0, timeoutMs: 6000 });
+      const json = await r.json();
+      const posts = json?.data?.children?.length || 0;
+      results.reddit = { configured: true, ok: true, posts };
+    } catch (e) { results.reddit = { configured: true, ok: false, error: e.message }; }
+  } else { results.reddit = { configured: false }; }
+  // Test NewsAPI
+  if (cfg.research_source_newsapi && String(cfg.research_newsapi_key || '').trim()) {
+    try {
+      const r = await fetchWithRetry(`https://newsapi.org/v2/everything?q=prediction+market&pageSize=1&language=en`, { headers: { 'X-Api-Key': cfg.research_newsapi_key } }, { label: 'newsapi-test', retries: 0, timeoutMs: 6000 });
+      const json = await r.json();
+      results.newsapi = { configured: true, ok: json.status === 'ok', total: json.totalResults || 0 };
+    } catch (e) { results.newsapi = { configured: true, ok: false, error: e.message }; }
+  } else { results.newsapi = { configured: false }; }
+  // Test GDELT
+  if (cfg.research_source_gdelt) {
+    try {
+      const r = await fetchWithRetry('https://api.gdeltproject.org/api/v2/doc/doc?query=prediction+market&mode=ArtList&maxrecords=3&format=json', {}, { label: 'gdelt-test', retries: 0, timeoutMs: 6000 });
+      const json = await r.json();
+      results.gdelt = { configured: true, ok: true, articles: (json?.articles || []).length };
+    } catch (e) { results.gdelt = { configured: true, ok: false, error: e.message }; }
+  } else { results.gdelt = { configured: false }; }
+  res.json({ ok: true, results });
+});
 app.post('/api/research/scan-recommendations', async (req, res) => {
   try {
     if (req.body?.run_research !== false) await runResearchStep();
@@ -146,6 +188,64 @@ app.post('/api/trades/reset', (req, res) => { const s = loadState(); const prev 
 app.get('/api/connection/test', async (_, res) => { const cfg = loadState().config || {}; const pm = await runPolymarketConnectionTest(cfg); const ka = await runKalshiConnectionTest(cfg); res.status(pm.reachable || ka.reachable ? 200 : 503).json({ ok: pm.reachable || ka.reachable, polymarket: pm, kalshi: ka }); });
 app.get('/api/connection/test/polymarket', async (_, res) => { const r = await runPolymarketConnectionTest(loadState().config || {}); res.status(r.reachable ? 200 : 503).json({ ok: r.reachable, ...r }); });
 app.get('/api/connection/test/kalshi', async (_, res) => { const r = await runKalshiConnectionTest(loadState().config || {}); res.status(r.reachable ? 200 : 503).json({ ok: r.reachable, ...r }); });
+
+app.get('/api/sources/test', async (_, res) => {
+  const cfg = loadState().config || {};
+  const results = {};
+  // RSS test
+  if (cfg.research_source_rss !== false) {
+    const feeds = String(cfg.research_rss_feeds || '').split(',').map(x => x.trim()).filter(Boolean);
+    results.rss = { enabled: true, feeds_configured: feeds.length, feeds_tested: [] };
+    for (const feed of feeds.slice(0, 3)) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 6000);
+        const resp = await fetch(feed, { signal: controller.signal, headers: { 'User-Agent': 'tradingbot/0.1' } });
+        clearTimeout(timer);
+        const text = await resp.text();
+        const items = (text.match(/<item[\s\S]*?<\/item>/gi) || []).length;
+        results.rss.feeds_tested.push({ url: feed.slice(0, 80), ok: true, items, status: resp.status });
+      } catch (e) { results.rss.feeds_tested.push({ url: feed.slice(0, 80), ok: false, error: String(e.message || e).slice(0, 100) }); }
+    }
+    results.rss.working = results.rss.feeds_tested.some(f => f.ok && f.items > 0);
+  } else { results.rss = { enabled: false, working: false }; }
+  // Reddit test
+  if (cfg.research_source_reddit !== false) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 7000);
+      const resp = await fetch('https://www.reddit.com/r/PredictionMarkets/hot.json?limit=3', { signal: controller.signal, headers: { 'User-Agent': 'tradingbot/0.1' } });
+      clearTimeout(timer);
+      const json = await resp.json();
+      const posts = json?.data?.children?.length || 0;
+      results.reddit = { enabled: true, working: posts > 0, posts_found: posts, status: resp.status };
+    } catch (e) { results.reddit = { enabled: true, working: false, error: String(e.message || e).slice(0, 100) }; }
+  } else { results.reddit = { enabled: false, working: false }; }
+  // NewsAPI test
+  if (cfg.research_source_newsapi && String(cfg.research_newsapi_key || '').trim()) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 7000);
+      const resp = await fetch(`https://newsapi.org/v2/everything?q=prediction+market&pageSize=1&language=en`, { signal: controller.signal, headers: { 'X-Api-Key': cfg.research_newsapi_key } });
+      clearTimeout(timer);
+      const json = await resp.json();
+      results.newsapi = { enabled: true, working: json.status === 'ok', total_results: json.totalResults || 0 };
+    } catch (e) { results.newsapi = { enabled: true, working: false, error: String(e.message || e).slice(0, 100) }; }
+  } else { results.newsapi = { enabled: Boolean(cfg.research_source_newsapi), working: false, key_missing: !String(cfg.research_newsapi_key || '').trim() }; }
+  // GDELT test
+  if (cfg.research_source_gdelt) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 7000);
+      const resp = await fetch('https://api.gdeltproject.org/api/v2/doc/doc?query=prediction%20market&mode=ArtList&maxrecords=3&format=json', { signal: controller.signal });
+      clearTimeout(timer);
+      const json = await resp.json();
+      results.gdelt = { enabled: true, working: (json.articles || []).length > 0, articles: (json.articles || []).length };
+    } catch (e) { results.gdelt = { enabled: true, working: false, error: String(e.message || e).slice(0, 100) }; }
+  } else { results.gdelt = { enabled: false, working: false }; }
+  const anyWorking = Object.values(results).some(r => r.working);
+  res.json({ ok: anyWorking, sources: results });
+});
 
 app.get('/api/auth/status', (_, res) => {
   const state = loadState();
