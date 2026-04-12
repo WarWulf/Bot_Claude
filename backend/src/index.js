@@ -67,7 +67,7 @@ app.get('/api/state', (_, res) => {
 // --- Scan ---
 app.get('/api/scan', (_, res) => { const s = loadState(); res.json({ scannedAt: s.scan_runs?.[0]?.time || null, markets: s.scan_results || [], runs: s.scan_runs || [] }); });
 app.post('/api/scan/run', async (_, res) => {
-  try { const { ranked, added, source, state } = await runScanCycle({ force: true }); res.json({ ok: true, source, added, tradeable_count: ranked.length, top: ranked.slice(0, 20), scanner_health: buildScannerHealth(state.markets || [], state.config || {}) }); }
+  try { const { ranked, added, source, state } = await runScanCycle({ force: true }); const selfTest = runStep1SelfTest(state); res.json({ ok: true, source, added, tradeable_count: ranked.length, top: ranked.slice(0, 20), scanner_health: buildScannerHealth(state.markets || [], state.config || {}), self_test: selfTest, step_status: computeStepStatus(state) }); }
   catch (e) { const s = loadState(); onScanFailure(e, s.config || {}); scanAudit(s, 'scan_failed_manual', { error: e.message }); saveState(s); res.status(500).json({ ok: false, message: e.message }); }
 });
 app.get('/api/scan/status', (_, res) => { const now = Date.now(); res.json({ runtime: { ...scannerRuntime, breaker_open: scannerRuntime.breakerUntil > now, breaker_remaining_sec: scannerRuntime.breakerUntil > now ? Math.ceil((scannerRuntime.breakerUntil - now) / 1000) : 0 }, last_run: (loadState().scan_runs || [])[0] || null }); });
@@ -139,7 +139,8 @@ app.post('/api/step1/finalize', async (_, res) => {
   catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
-app.post('/api/markets/reset', (req, res) => { const s = loadState(); const prev = s.markets.length; s.markets = []; s.scan_results = []; s.scan_runs = []; s.scan_history = {}; s.research_briefs = []; logLine(s, 'warning', 'markets reset'); saveState(s); res.json({ ok: true, previous_markets: prev }); });
+app.post('/api/markets/reset', (req, res) => { const s = loadState(); const prev = s.markets.length; s.markets = []; s.scan_results = []; s.scan_runs = []; s.scan_history = {}; s.research_briefs = []; s.predictions = []; logLine(s, 'warning', 'markets reset'); saveState(s); res.json({ ok: true, previous_markets: prev }); });
+app.post('/api/trades/reset', (req, res) => { const s = loadState(); const prev = (s.trades||[]).length; s.trades = []; s.signals = []; s.orders = []; s.execution_runs = []; s.step4_summary = { completed_at: null, candidate_signals:0, executed_orders:0, skipped_orders:0, opened_trades:0, risk_blocked_orders:0, paper_mode: true }; logLine(s, 'warning', `trades reset (${prev} deleted)`); saveState(s); res.json({ ok: true, previous_trades: prev }); });
 
 // --- Connections ---
 app.get('/api/connection/test', async (_, res) => { const cfg = loadState().config || {}; const pm = await runPolymarketConnectionTest(cfg); const ka = await runKalshiConnectionTest(cfg); res.status(pm.reachable || ka.reachable ? 200 : 503).json({ ok: pm.reachable || ka.reachable, polymarket: pm, kalshi: ka }); });

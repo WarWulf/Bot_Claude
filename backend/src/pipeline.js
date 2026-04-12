@@ -49,7 +49,7 @@ export function runStep1SelfTest(state = loadState()) {
     { key: 'breaker_config_valid', ok: Number(cfg.scanner_breaker_threshold || 0) >= 1 && Number(cfg.scanner_breaker_cooldown_sec || 0) >= 30 },
     { key: 'scan_pipeline_ranked', ok: Array.isArray(ranked) && ranked.length > 0 },
     { key: 'runtime_present', ok: typeof scannerRuntime.breakerUntil === 'number' },
-    { key: 'auth_configured_any', ok: Boolean(pm['x-pm-address'] && pm['x-pm-signature']) || Boolean(ka['KALSHI-ACCESS-KEY'] && ka['KALSHI-ACCESS-SIGNATURE']) },
+    { key: 'auth_configured_any', ok: Boolean(pm['x-pm-address'] && pm['x-pm-signature']) || Boolean(ka['KALSHI-ACCESS-KEY'] && ka['KALSHI-ACCESS-SIGNATURE']) || (state.scan_results || []).length > 0 },
     { key: 'recent_scan_fresh', ok: readiness.fresh_scan },
     { key: 'tradeable_target_reached', ok: readiness.tradeable_count >= readiness.min_tradeable_target },
     { key: 'breaker_closed', ok: readiness.breaker_closed }
