@@ -12,13 +12,13 @@ SSH auf deinen VPS und dann:
 
 ```bash
 # Direkt von GitHub deployen
-curl -sL https://raw.githubusercontent.com/WarWulf/Tradingbot/MainV3.3/scripts/deploy.sh | bash
+curl -sL https://raw.githubusercontent.com/WarWulf/Bot_Claude/main/scripts/deploy.sh | bash
 ```
 
 Oder wenn du das Script lieber vorher anschauen willst:
 
 ```bash
-wget https://raw.githubusercontent.com/WarWulf/Tradingbot/MainV3.3/scripts/deploy.sh
+wget https://raw.githubusercontent.com/WarWulf/Bot_Claude/main/scripts/deploy.sh
 cat deploy.sh          # anschauen
 bash deploy.sh         # ausführen
 ```
@@ -32,7 +32,7 @@ sudo usermod -aG docker $USER
 # Einmal ausloggen und neu einloggen!
 
 # 2. Repo klonen
-git clone -b MainV3.3 https://github.com/WarWulf/Tradingbot.git ~/tradingbot
+git clone https://github.com/WarWulf/Bot_Claude.git ~/tradingbot
 cd ~/tradingbot
 
 # 3. Konfiguration

@@ -37,8 +37,8 @@ fi
 
 # --- 3. Repo klonen ---
 echo "[3/6] Repository klonen..."
-REPO_URL="${1:-https://github.com/WarWulf/Tradingbot.git}"
-BRANCH="${2:-MainV3.3}"
+REPO_URL="${1:-https://github.com/WarWulf/Bot_Claude.git}"
+BRANCH="${2:-main}"
 APP_DIR="$HOME/tradingbot"
 
 if [ -d "$APP_DIR" ]; then
