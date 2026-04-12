@@ -54,6 +54,8 @@ export default function App(){
   const [researchStatus,setResearchStatus]=useState(null);
   const [execStatus,setExecStatus]=useState(null);
   const [riskStatus,setRiskStatus]=useState(null);
+  const [nightlyStatus,setNightlyStatus]=useState(null);
+  const [compoundStatus,setCompoundStatus]=useState(null);
   const [busy,setBusy]=useState({});
   const [msg,setMsg]=useState('');
   const [uiAuthed,setUiAuthed]=useState(false);
@@ -66,14 +68,16 @@ export default function App(){
   const apiFetch=useCallback(async(path,opts={})=>{const h={...(opts.headers||{})};if(uiPw)h['x-ui-password']=uiPw;return fetch(path,{...opts,headers:h});},[uiPw]);
   const apiJson=useCallback(async(path,fb=null)=>{try{const r=await apiFetch(path);if(!r.ok)throw 0;return await r.json();}catch{return fb;}},[apiFetch]);
   const reload=useCallback(async()=>{
-    const[st,sc,au,he,ss,stp,ps,cal,cor,rs,es,rsk]=await Promise.all([
+    const[st,sc,au,he,ss,stp,ps,cal,cor,rs,es,rsk,ni,co]=await Promise.all([
       apiJson('/api/state'),apiJson('/api/scan',{markets:[],runs:[]}),apiJson('/api/auth/status'),
       apiJson('/api/health'),apiJson('/api/scan/status'),apiJson('/api/status/steps'),
       apiJson('/api/predict/status'),apiJson('/api/predict/calibration'),
-      apiJson('/api/predict/correlations'),apiJson('/api/research/status'),apiJson('/api/execute/status'),apiJson('/api/risk/status')
+      apiJson('/api/predict/correlations'),apiJson('/api/research/status'),apiJson('/api/execute/status'),apiJson('/api/risk/status'),
+      apiJson('/api/nightly/status'),apiJson('/api/compound/status')
     ]);
     if(st)setState(st);setScan(sc||{markets:[],runs:[]});setAuth(au);setHealth(he);setScanStatus(ss);setSteps(stp);
     setPredictStatus(ps);setCalibration(cal);setCorrelations(cor);setResearchStatus(rs);setExecStatus(es);setRiskStatus(rsk);
+    setNightlyStatus(ni);setCompoundStatus(co);
   },[apiJson]);
 
   async function doLogin(){try{const r=await fetch('/api/ui-auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pwInput})});if(!r.ok)throw new Error('Falsches Passwort');localStorage.setItem('ui_pw',pwInput);setUiPw(pwInput);setPwInput('');setUiAuthed(true);}catch(e){setMsg(e.message);}}
@@ -207,19 +211,19 @@ export default function App(){
         </Card>
 
         {/* Step Progress */}
-        <Card title="Fortschritt">
+        <Card title="Fortschritt" help="Jeder Step hat Checks. Grün = 100%. Gelb = manche Checks fehlen. Klicke auf einen fehlgeschlagenen Check für Details.">
           {[{n:1,k:'step1',l:'Scan'},{n:2,k:'step2',l:'Research'},{n:3,k:'step3',l:'Predict'},{n:4,k:'step4',l:'Execute'},{n:5,k:'step5',l:'Risk'}].map(({n,k,l})=>{
-            const v=Number(steps?.[k]?.progress_pct||0);const fails=(steps?.[k]?.checks||[]).filter(c=>!c.ok);
-            return<div key={k} style={{marginBottom:6}}>
+            const v=Number(steps?.[k]?.progress_pct||0);const checks=steps?.[k]?.checks||[];const fails=checks.filter(c=>!c.ok);
+            return<div key={k} style={{marginBottom:8}}>
               <div style={{display:'flex',justifyContent:'space-between',fontSize:11,color:C.muted,marginBottom:2,...mono}}><span>Step {n}: {l}</span><span style={{color:v>=100?C.green:v>0?C.amber:C.muted}}>{fmt(v,0)}%</span></div>
               <div style={{height:5,background:C.dim,borderRadius:3,overflow:'hidden'}}><div style={{height:'100%',width:`${v}%`,background:v>=100?C.green:v>0?C.amber:C.dim,borderRadius:3,transition:'width 0.4s'}}/></div>
-              {fails.length>0&&<div style={{fontSize:10,color:C.amber,marginTop:2}}>{fails.map(c=>c.key.replace(/_/g,' ')).join(' · ')}</div>}
+              {fails.length>0&&<div style={{marginTop:3}}>
+                {fails.map((c,i)=><div key={i} style={{fontSize:10,color:C.amber,display:'flex',alignItems:'flex-start',gap:4,marginTop:1}}>
+                  <span>❌</span><span>{c.desc||c.key.replace(/_/g,' ')}</span>
+                </div>)}
+              </div>}
+              {v>=100&&<div style={{fontSize:10,color:C.green,marginTop:2}}>✅ Alle Checks bestanden</div>}
             </div>;})}
-          {step1Pct<100&&step1Pct>0&&<Tip>
-            {step1Fails.includes('self_test')&&'Self-Test nicht bestanden. '}
-            {step1Fails.includes('tradeable_target')&&'Zu wenige Märkte — senke Min Volume (z.B. 200) in Einstellungen. '}
-            {step1Fails.includes('scan_freshness')&&'Scan veraltet — klicke Scan. '}
-          </Tip>}
         </Card>
 
         {/* Self-Test Detail */}
@@ -306,6 +310,41 @@ export default function App(){
           {!markets.length&&<div style={{color:C.muted,fontSize:12}}>Keine Märkte. Starte einen Scan im Pipeline-Tab.</div>}
         </Card>
 
+        {/* Research Search Log */}
+        {researchStatus?.summary?.search_log&&<Card title="🔎 Research — wo wurde gesucht?" help="Zeigt welche Quellen mit welchen Suchbegriffen abgefragt wurden und wie viele Headlines gefunden wurden.">
+          <div style={{fontSize:11,...mono}}>
+            <div style={{color:C.muted,marginBottom:6}}>Headlines total: <strong style={{color:C.text}}>{researchStatus.summary.search_log.total_headlines_fetched||0}</strong></div>
+            {(researchStatus.summary.search_log.sources_queried||[]).map((s,i)=><div key={i} style={{padding:'4px 0',borderBottom:`1px solid ${C.border}11`}}>
+              <span style={{color:C.cyan,fontWeight:600}}>{s.type.toUpperCase()}</span>
+              {s.type==='rss'&&<span style={{color:C.muted}}> — {s.count} Feeds: {(s.feeds||[]).map(f=><span key={f} style={{color:C.dim,fontSize:10}}>{f} </span>)}</span>}
+              {s.type==='reddit'&&<span style={{color:C.muted}}> — Subreddits: {(s.subreddits||[]).map(r=><span key={r} style={{color:C.purple,fontSize:10}}>r/{r} </span>)} · Query: <span style={{color:C.amber}}>{s.search_query}</span></span>}
+              {s.type==='newsapi'&&<span style={{color:C.muted}}> — Query: <span style={{color:C.amber}}>{s.query}</span></span>}
+              {s.type==='gdelt'&&<span style={{color:C.muted}}> — Query: <span style={{color:C.amber}}>{s.query}</span></span>}
+              {s.type==='x_rss'&&<span style={{color:C.muted}}> — Feeds: {(s.feeds||[]).join(', ')}</span>}
+              {researchStatus.summary.search_log.headlines_per_source?.[s.type]!=null&&<span style={{color:C.green}}> → {researchStatus.summary.search_log.headlines_per_source[s.type]} Headlines</span>}
+            </div>)}
+          </div>
+        </Card>}
+
+        {/* Research Briefs mit Keywords */}
+        {briefs.length>0&&<Card title={`Research Briefs (${briefs.length})`} help="Für jeden Markt: welche Keywords gesucht wurden, welche Headlines matched haben, und was die Stimmung ist.">
+          {briefs.map((b,i)=><div key={i} style={{padding:'7px 0',borderBottom:`1px solid ${C.border}11`}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+              <span style={{fontSize:12,fontWeight:500}}>{b.question}</span>
+              <span style={{fontSize:10,...mono,color:b.sentiment==='bullish'?C.green:b.sentiment==='bearish'?C.red:C.muted}}>{b.sentiment}</span>
+            </div>
+            {(b.search_keywords||[]).length>0&&<div style={{fontSize:10,color:C.dim,marginTop:2}}>
+              🔍 Suchbegriffe: {(b.search_keywords||[]).map((k,j)=><span key={j} style={{color:(b.matched_keywords||[]).includes(k)?C.green:C.dim,marginRight:4}}>{k}{(b.matched_keywords||[]).includes(k)?'✓':''}</span>)}
+            </div>}
+            {(b.matched_keywords||[]).length>0&&<div style={{fontSize:10,color:C.green,marginTop:1,...mono}}>✅ Matched: {b.matched_keywords.join(', ')}</div>}
+            <div style={{fontSize:10,color:C.muted,marginTop:2,...mono}}>conf: {fmt(b.confidence,3)} · gap: {fmt(b.consensus_vs_market_gap,3)} · stance: {b.stance} · sources: {(b.sources||[]).filter(s=>s.source_type!=='none').length}</div>
+            {b.thesis&&<div style={{fontSize:11,color:C.dim,marginTop:2,fontStyle:'italic'}}>{b.thesis}</div>}
+            {(b.sources||[]).filter(s=>s.source_type!=='none').slice(0,3).map((s,j)=><div key={j} style={{fontSize:10,color:C.muted,marginTop:1,marginLeft:12}}>
+              📰 [{s.source_type}] {(s.title||'').slice(0,60)} <span style={{color:C.dim}}>({s.domain}) kw:{(s.matched_keywords||[]).join(',')}</span>
+            </div>)}
+          </div>)}
+        </Card>}
+
         {/* Predictions */}
         {predictions.length>0&&<Card title={`Predictions (${predictions.length})`} help="BUY_YES = Markt unterbewertet. BUY_NO = überbewertet. NO_TRADE = kein Signal. Die Erklärung steht unter jeder Prediction.">
           {predictions.slice(0,15).map((p,i)=><div key={i} style={{padding:'6px 0',borderBottom:`1px solid ${C.border}11`}}>
@@ -374,6 +413,7 @@ export default function App(){
               {key:'daily_loss_limit_pct',label:'Daily Loss Limit',rec:0.15,desc:'Max Tagesverlust bevor der Bot pausiert.',why:'15% verhindert Katastrophen-Tage.'},
               {key:'paper_trade_risk_pct',label:'Paper Trade Risk %',rec:0.02,desc:'Positions-Größe im Paper Mode (% des Bankrolls).',why:'2% pro Paper-Trade.'},
               {key:'top_n',label:'Top N',rec:10,desc:'Wie viele Märkte pro Scan in die Pipeline gehen.',why:'10 ist ein guter Kompromiss.'},
+              {key:'auto_running',label:'Auto-Pipeline',rec:false,desc:'Wenn AN: läuft die komplette Pipeline (Scan→Research→Predict→Execute→Risk→Learn) automatisch alle X Minuten.',why:'Erst einschalten wenn du die Pipeline manuell getestet hast!',type:'bool'},
             ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
           </Card>
           {/* Scanner */}
@@ -479,10 +519,51 @@ export default function App(){
       {/* ═══════════════════════════════════════════ */}
       {tab==='log'&&<div>
         <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:14}}>
-          <Metric label="Breaker" value={scanStatus?.runtime?.breaker_open?'OPEN':'OK'} good={!scanStatus?.runtime?.breaker_open} help="Scanner Circuit Breaker"/>
-          <Metric label="Scan Fails" value={scanStatus?.runtime?.consecutiveFailures||0} good={Number(scanStatus?.runtime?.consecutiveFailures||0)<3}/>
-          <Metric label="Pipeline Runs" value={(state?.pipeline_runs||[]).length}/>
+          <Metric label="Brier Score" value={fmt(nightlyStatus?.brier_score,4)} target="< 0.250" good={Number(nightlyStatus?.brier_score??1)<0.25} help="Wie gut deine Vorhersagen sind. 0=perfekt, 0.25=Münzwurf. Unter 0.25 ist gut!"/>
+          <Metric label="Brier Samples" value={nightlyStatus?.brier_samples||0} help="Wie viele Outcomes erfasst wurden"/>
+          <Metric label="Win Rate" value={compoundStatus?.summary?.winRate?`${(compoundStatus.summary.winRate*100).toFixed(0)}%`:'-'} target="≥60%" good={Number(compoundStatus?.summary?.winRate||0)>=0.6} help="Anteil gewonnener Trades"/>
+          <Metric label="Profit Factor" value={compoundStatus?.summary?.profitFactor||'-'} target="≥1.5" good={Number(compoundStatus?.summary?.profitFactor||0)>=1.5} help="Bruttogewinn / Bruttoverlust. Über 1.5 ist gesund."/>
+          <Metric label="Breaker" value={scanStatus?.runtime?.breaker_open?'OPEN':'OK'} good={!scanStatus?.runtime?.breaker_open}/>
         </div>
+
+        {/* Brier Score Erklärung */}
+        <Card title="📐 Brier Score — wie gut sind die Vorhersagen?" help="Der Brier Score misst ob deine Wahrscheinlichkeits-Schätzungen stimmen. Beispiel: Du sagst '70% Wahrscheinlichkeit' → wenn es eintritt: (0.7-1)²=0.09 (gut). Wenn nicht: (0.7-0)²=0.49 (schlecht). Der Durchschnitt über alle Predictions ist dein Brier Score.">
+          <div style={{fontSize:12,color:C.muted,lineHeight:1.6}}>
+            <strong>0.00</strong> = Perfekte Vorhersagen · <strong>0.25</strong> = So gut wie Münzwurf · <strong>&gt;0.25</strong> = Schlecht<br/>
+            Aktuell: <strong style={{color:Number(nightlyStatus?.brier_score??1)<0.25?C.green:C.red}}>{nightlyStatus?.brier_score!=null?nightlyStatus.brier_score:'Noch keine Daten'}</strong> über {nightlyStatus?.brier_samples||0} Outcomes.<br/>
+            <span style={{fontSize:11,color:C.dim}}>Outcomes werden erfasst wenn Märkte auslaufen. Mehr Samples = zuverlässigerer Score.</span>
+          </div>
+        </Card>
+
+        {/* Compound Status */}
+        {compoundStatus?.summary?.updated_at&&<Card title="🧠 Learning Status (Compound)" help="Der Bot analysiert abgeschlossene Trades und schreibt Verluste in die failure_log.md. So vermeidet er beim nächsten Scan dieselben Fehler.">
+          <div style={{fontSize:11,...mono,color:C.muted}}>
+            Letzte Analyse: {(compoundStatus.summary.updated_at||'').slice(0,19)}<br/>
+            Trades analysiert: {compoundStatus.summary.total_trades||0} · Wins: {compoundStatus.summary.wins||0} · Losses: {compoundStatus.summary.losses||0}<br/>
+            Win Rate: <span style={{color:Number(compoundStatus.summary.winRate||0)>=0.6?C.green:C.amber}}>{((compoundStatus.summary.winRate||0)*100).toFixed(1)}%</span> · 
+            Profit Factor: <span style={{color:Number(compoundStatus.summary.profitFactor||0)>=1.5?C.green:C.amber}}>{compoundStatus.summary.profitFactor}</span> · 
+            P&L: <span style={{color:Number(compoundStatus.summary.totalPnl||0)>=0?C.green:C.red}}>${compoundStatus.summary.totalPnl}</span>
+          </div>
+        </Card>}
+
+        {/* Nightly Reviews */}
+        {(nightlyStatus?.reviews||[]).length>0&&<Card title="🌙 Nightly Reviews" help="Einmal täglich (Mitternacht UTC) analysiert der Bot den ganzen Tag: Trades, Win Rate, P&L, Brier Score. Hier die letzten Tage.">
+          <div style={{overflowX:'auto'}}>
+            <table style={{width:'100%',borderCollapse:'collapse',fontSize:10,...mono}}>
+              <thead><tr style={{color:C.muted,textAlign:'left'}}>{['Datum','Trades','Wins','Losses','P&L','Brier'].map(h=><th key={h} style={{padding:'4px 6px',borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead>
+              <tbody>{(nightlyStatus.reviews||[]).slice(0,14).map((r,i)=><tr key={i} style={{borderBottom:`1px solid ${C.border}11`}}>
+                <td style={{padding:'4px 6px'}}>{r.date}</td>
+                <td style={{padding:'4px 6px'}}>{r.trades}</td>
+                <td style={{padding:'4px 6px',color:C.green}}>{r.wins}</td>
+                <td style={{padding:'4px 6px',color:C.red}}>{r.losses}</td>
+                <td style={{padding:'4px 6px',color:Number(r.pnl||0)>=0?C.green:C.red}}>${fmt(r.pnl,0)}</td>
+                <td style={{padding:'4px 6px',color:Number(r.brier_score??1)<0.25?C.green:C.amber}}>{r.brier_score!=null?fmt(r.brier_score,4):'-'}</td>
+              </tr>)}</tbody>
+            </table>
+          </div>
+        </Card>}
+
+        {/* Pipeline Runs */}
         {(state?.pipeline_runs||[]).length>0&&<Card title="Pipeline Runs" help="Zeigt wann die Pipeline gelaufen ist und was dabei rauskam.">
           {(state?.pipeline_runs||[]).slice(0,8).map((run,i)=><div key={i} style={{padding:'4px 0',borderBottom:`1px solid ${C.border}11`,fontSize:10,...mono}}>
             <span style={{color:C.muted}}>{(run.time||'').slice(0,19)}</span>

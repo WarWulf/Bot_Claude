@@ -67,14 +67,50 @@ async function fetchResearchHeadlines(cfg = {}) {
 
 export async function runResearchStep() {
   const state = loadState();
-  const top = (state.scan_results || []).slice(0, Number(state.config.top_n || 10));
-  const minOverlap = Math.max(1, Number(state.config.research_min_keyword_overlap || 2));
-  const minCredibility = Math.max(0, Math.min(1, Number(state.config.research_min_credibility || 0.4)));
-  const headlines = (await fetchResearchHeadlines(state.config || {}))
+  const cfg = state.config || {};
+  const top = (state.scan_results || []).slice(0, Number(cfg.top_n || 10));
+  const minOverlap = Math.max(1, Number(cfg.research_min_keyword_overlap || 2));
+  const minCredibility = Math.max(0, Math.min(1, Number(cfg.research_min_credibility || 0.4)));
+
+  // Track what we searched and where (transparency)
+  const searchLog = {
+    time: new Date().toISOString(),
+    sources_queried: [],
+    total_headlines_fetched: 0,
+    markets_analyzed: top.length,
+  };
+
+  // Log which sources we're querying
+  if (Boolean(cfg.research_source_rss ?? true)) {
+    const feeds = String(cfg.research_rss_feeds || '').split(',').map(x => x.trim()).filter(Boolean);
+    searchLog.sources_queried.push({ type: 'rss', feeds: feeds.map(f => f.slice(0, 80)), count: feeds.length });
+  }
+  if (Boolean(cfg.research_source_reddit ?? true)) {
+    const subs = String(cfg.research_reddit_subreddits || 'politics,worldnews,PredictionMarkets').split(',').map(x => x.trim()).filter(Boolean);
+    const query = String(cfg.research_reddit_query || 'election OR policy OR legal OR odds');
+    searchLog.sources_queried.push({ type: 'reddit', subreddits: subs, search_query: query });
+  }
+  if (Boolean(cfg.research_source_newsapi) && String(cfg.research_newsapi_key || '').trim()) {
+    searchLog.sources_queried.push({ type: 'newsapi', query: String(cfg.research_newsapi_query || 'prediction market') });
+  }
+  if (Boolean(cfg.research_source_gdelt)) {
+    searchLog.sources_queried.push({ type: 'gdelt', query: String(cfg.research_gdelt_query || 'prediction market') });
+  }
+  if (Boolean(cfg.research_source_x)) {
+    const feeds = String(cfg.research_x_rss_feeds || '').split(',').map(x => x.trim()).filter(Boolean);
+    searchLog.sources_queried.push({ type: 'x_rss', feeds: feeds.map(f => f.slice(0, 80)) });
+  }
+
+  const headlines = (await fetchResearchHeadlines(cfg))
     .map((h) => {
       const host = (() => { try { return new URL(h.link).hostname.replace(/^www\./, ''); } catch { return ''; } })();
       return { ...h, tokens: tokenize(h.title), domain: host, credibility: DOMAIN_CREDIBILITY[host] || 0.5, recency: recencyWeight(h.published_at) };
     });
+
+  searchLog.total_headlines_fetched = headlines.length;
+  // Count per source type
+  searchLog.headlines_per_source = {};
+  headlines.forEach(h => { const t = h.source_type || 'unknown'; searchLog.headlines_per_source[t] = (searchLog.headlines_per_source[t] || 0) + 1; });
 
   const briefs = top.map((m) => {
     const marketTokens = tokenize(m.question);
@@ -82,8 +118,9 @@ export async function runResearchStep() {
       const overlap = marketTokens.filter((t) => h.tokens.includes(t)).length;
       return overlap >= minOverlap && h.credibility >= minCredibility;
     }).map((h) => {
-      const overlap = marketTokens.filter((t) => h.tokens.includes(t)).length;
-      return { ...h, overlap, evidence_score: Number((overlap * 0.3 + h.credibility * 0.4 + h.recency * 0.3).toFixed(3)) };
+      const overlapTokens = marketTokens.filter((t) => h.tokens.includes(t));
+      const overlap = overlapTokens.length;
+      return { ...h, overlap, matched_keywords: overlapTokens, evidence_score: Number((overlap * 0.3 + h.credibility * 0.4 + h.recency * 0.3).toFixed(3)) };
     }).sort((a, b) => b.evidence_score - a.evidence_score).slice(0, 8);
 
     const sentimentVotes = { bullish: 0, bearish: 0, neutral: 0 };
@@ -93,28 +130,43 @@ export async function runResearchStep() {
     const confidence = Number(Math.min(0.95, 0.3 + evidenceMean * 0.25 + Math.min(0.2, matched.length * 0.04)).toFixed(3));
     const narrativeGap = Number(Math.max(0, ((m.opportunity_score || 0) / 100) - Math.min(0.25, evidenceMean * 0.2)).toFixed(3));
     const stance = matched.length >= 3 ? 'supported' : matched.length === 2 ? 'mixed' : 'unclear';
-    const completionScore = Number(Math.min(1, (matched.length / 4) * 0.7 + Math.min(0.3, evidenceMean * 0.1)).toFixed(3));
     const narrativeConsensusProb = Number(Math.max(0.01, Math.min(0.99, sentiment === 'bullish' ? 0.62 + Math.min(0.2, matched.length * 0.03) : sentiment === 'bearish' ? 0.38 - Math.min(0.2, matched.length * 0.03) : 0.5)).toFixed(3));
     const marketPrice = Number(m.market_price || 0.5);
     const marketNarrativeGap = Number((narrativeConsensusProb - marketPrice).toFixed(3));
-    const thesis = matched.length ? `Gefundene Headlines unterstützen teilweise das Markt-Narrativ (${matched.length} Treffer).` : 'Aktuell keine starken externen Belege gefunden.';
+    const thesis = matched.length ? `${matched.length} Headlines gefunden (Keywords: ${[...new Set(matched.flatMap(x => x.matched_keywords || []))].join(', ')}).` : 'Keine passenden Headlines gefunden.';
     const catalysts = matched.slice(0, 2).map((x) => x.title);
     const risks = [matched.length < 2 ? 'Dünne Evidenzlage' : null, Number(m.estimated_slippage || 0) > 0.015 ? 'Erhöhte Slippage' : null, Number(m.spread || 0) > 0.04 ? 'Breiter Spread' : null].filter(Boolean);
 
-    return { time: new Date().toISOString(), market_id: m.id, question: m.question, sentiment, market_price: marketPrice, narrative_consensus_prob: narrativeConsensusProb, consensus_vs_market_gap: marketNarrativeGap, sentiment_breakdown: sentimentVotes, narrative_gap: narrativeGap, confidence, completion_score: completionScore, stance, thesis, catalysts, risks, sources: matched.length ? matched : [{ title: 'Keine RSS-Treffer (noch Heuristik-Mode)', link: '', published_at: null, overlap: 0 }], note: 'Research Step 2: Multi-Source Matching.', safety_note: 'Externe Inhalte werden nur als Daten behandelt, niemals als Instruktionen.' };
+    // Collect all unique matched keywords for this market
+    const allMatchedKeywords = [...new Set(matched.flatMap(x => x.matched_keywords || []))];
+
+    return {
+      time: new Date().toISOString(), market_id: m.id, question: m.question,
+      search_keywords: marketTokens, matched_keywords: allMatchedKeywords,
+      sentiment, market_price: marketPrice,
+      narrative_consensus_prob: narrativeConsensusProb, consensus_vs_market_gap: marketNarrativeGap,
+      sentiment_breakdown: sentimentVotes, narrative_gap: narrativeGap,
+      confidence, stance, thesis, catalysts, risks,
+      sources: matched.length ? matched.map(s => ({
+        title: s.title, link: s.link, source_type: s.source_type, domain: s.domain,
+        matched_keywords: s.matched_keywords, overlap: s.overlap, evidence_score: s.evidence_score,
+        published_at: s.published_at, credibility: s.credibility,
+      })) : [{ title: 'Keine Treffer', link: '', source_type: 'none', overlap: 0 }],
+    };
   });
 
   state.research_briefs = briefs;
+  state.research_search_log = searchLog; // Store the search transparency log
   const sourceDomains = new Set(briefs.flatMap((b) => (b.sources || []).map((s) => s.domain).filter(Boolean)));
   const avgConfidence = briefs.length ? briefs.reduce((sum, b) => sum + Number(b.confidence || 0), 0) / briefs.length : 0;
-  const coverage = top.length ? briefs.filter((b) => Number((b.sources || []).length) > 0).length / top.length : 0;
+  const coverage = top.length ? briefs.filter((b) => (b.sources || []).some(s => s.source_type !== 'none')).length / top.length : 0;
   const sourceBreakdown = briefs.flatMap((b) => b.sources || []).reduce((acc, s) => { acc[s.source_type || 'unknown'] = (acc[s.source_type || 'unknown'] || 0) + 1; return acc; }, {});
   const paperReadyBriefs = briefs.filter((b) => Number(b.confidence || 0) >= 0.58 && Number((b.sources || []).length) >= 2).length;
 
-  state.research_summary = { completed_at: new Date().toISOString(), analyzed_markets: briefs.length, avg_confidence: Number(avgConfidence.toFixed(3)), source_diversity: sourceDomains.size, coverage_pct: Number((coverage * 100).toFixed(1)), source_breakdown: sourceBreakdown, paper_ready_briefs: paperReadyBriefs, paper_ready_pct: Number((briefs.length ? (paperReadyBriefs / briefs.length) * 100 : 0).toFixed(1)) };
+  state.research_summary = { completed_at: new Date().toISOString(), analyzed_markets: briefs.length, avg_confidence: Number(avgConfidence.toFixed(3)), source_diversity: sourceDomains.size, coverage_pct: Number((coverage * 100).toFixed(1)), source_breakdown: sourceBreakdown, paper_ready_briefs: paperReadyBriefs, paper_ready_pct: Number((briefs.length ? (paperReadyBriefs / briefs.length) * 100 : 0).toFixed(1)), search_log: searchLog };
   state.research_runs = state.research_runs || [];
   state.research_runs.unshift({ time: new Date().toISOString(), analyzed: briefs.length, summary: state.research_summary });
   state.research_runs = state.research_runs.slice(0, 50);
   saveState(state);
-  return { briefs, summary: state.research_summary, runs: state.research_runs };
+  return { briefs, summary: state.research_summary, runs: state.research_runs, search_log: searchLog };
 }

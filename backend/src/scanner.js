@@ -4,6 +4,25 @@ import { loadState, saveState, logLine, nextId } from './appState.js';
 import { pushLiveComm } from './utils.js';
 import { calcSevenDayVolumeAvg, estimateSlippage, isWithinActiveHours } from './scanCore.js';
 import { fetchPolymarketMarkets, fetchKalshiMarkets } from './platforms.js';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+// Read failure_log.md to learn from past mistakes
+function loadFailurePatterns() {
+  try {
+    const logPath = resolve(process.cwd(), 'predict-market-bot', 'references', 'failure_log.md');
+    if (!existsSync(logPath)) return new Set();
+    const content = readFileSync(logPath, 'utf8');
+    const patterns = new Set();
+    // Extract market names from "### Date — Market Name" lines
+    const matches = content.match(/^###\s+.+?—\s+(.+)$/gm) || [];
+    for (const m of matches) {
+      const name = m.replace(/^###\s+.+?—\s+/, '').trim().toLowerCase();
+      if (name.length > 3) patterns.add(name);
+    }
+    return patterns;
+  } catch { return new Set(); }
+}
 
 export const scannerRuntime = {
   consecutiveFailures: 0,
@@ -33,8 +52,19 @@ export function scanAndRankMarkets(markets, cfg) {
   const minAnomalyScore = Number(cfg.scanner_min_anomaly_score || 1);
   const maxSlippage = Number(cfg.scanner_max_slippage_pct || 0.02);
 
+  // Load past failures to avoid repeating mistakes
+  const failurePatterns = loadFailurePatterns();
+
   return markets
     .filter((m) => ['open', 'active', ''].includes(String(m.status || '').toLowerCase()))
+    // Skip markets that match past failures
+    .filter((m) => {
+      const q = String(m.question || m.market || '').toLowerCase();
+      for (const pattern of failurePatterns) {
+        if (q.includes(pattern) || pattern.includes(q.slice(0, 20))) return false;
+      }
+      return true;
+    })
     .map((m) => {
       const price = Number(m.market_price || 0);
       const prevPrice = Number(m.prev_market_price || price);

@@ -63,27 +63,45 @@ export function computeStepStatus(state = loadState()) {
   const readiness = computeStep1Readiness(state);
   const toPct = (checks) => Number(((checks.filter((c) => c.ok).length / checks.length) * 100).toFixed(1));
 
+  const briefs = state.research_briefs || [];
+  const predictions = state.predictions || [];
+  const brierSamples = (state.prediction_outcomes || []).length;
+  const brierScore = state.brier_score;
+  const trades = state.trades || [];
+  const openTrades = trades.filter(t => t.status === 'OPEN');
+  const closedTrades = trades.filter(t => t.status !== 'OPEN');
+
   const step1Checks = [
-    { key: 'self_test', ok: selfTest.ok }, { key: 'scan_runs_exist', ok: (state.scan_runs || []).length > 0 },
-    { key: 'scan_freshness', ok: readiness.fresh_scan }, { key: 'tradeable_target', ok: readiness.tradeable_count >= readiness.min_tradeable_target },
-    { key: 'breaker_closed', ok: readiness.breaker_closed }
+    { key: 'self_test', ok: selfTest.ok, desc: 'Scanner Self-Test bestanden' },
+    { key: 'scan_runs_exist', ok: (state.scan_runs || []).length > 0, desc: 'Mindestens ein Scan wurde durchgeführt' },
+    { key: 'scan_freshness', ok: readiness.fresh_scan, desc: `Letzter Scan ist aktuell (max ${Number(cfg.scan_interval_minutes || 15) * 2} Min alt)` },
+    { key: 'tradeable_target', ok: readiness.tradeable_count >= readiness.min_tradeable_target, desc: `Mind. ${readiness.min_tradeable_target} tradeable Märkte (aktuell: ${readiness.tradeable_count})` },
+    { key: 'breaker_closed', ok: readiness.breaker_closed, desc: 'Circuit Breaker geschlossen (Scanner nicht pausiert)' }
   ];
   const step2Checks = [
-    { key: 'research_runs_exist', ok: (state.research_runs || []).length > 0 },
-    { key: 'briefs_present', ok: (state.research_briefs || []).length > 0 },
-    { key: 'coverage_present', ok: Number(state.research_summary?.coverage_pct || 0) > 0 }
+    { key: 'research_runs_exist', ok: (state.research_runs || []).length > 0, desc: 'Mindestens ein Research-Lauf durchgeführt' },
+    { key: 'briefs_present', ok: briefs.length > 0, desc: `Research Briefs vorhanden (aktuell: ${briefs.length})` },
+    { key: 'coverage_present', ok: Number(state.research_summary?.coverage_pct || 0) > 0, desc: `Coverage > 0% (aktuell: ${Number(state.research_summary?.coverage_pct || 0).toFixed(1)}%)` },
+    { key: 'source_diversity', ok: Number(state.research_summary?.source_diversity || 0) >= 1, desc: `Mind. 1 Nachrichtenquelle liefert Daten (aktuell: ${state.research_summary?.source_diversity || 0} Quellen)` },
+    { key: 'avg_confidence', ok: Number(state.research_summary?.avg_confidence || 0) >= 0.3, desc: `Durchschnittliche Confidence ≥ 0.3 (aktuell: ${Number(state.research_summary?.avg_confidence || 0).toFixed(3)})` },
   ];
   const step3Checks = [
-    { key: 'predict_runs_exist', ok: (state.predict_runs || []).length > 0 },
-    { key: 'predictions_present', ok: (state.predictions || []).length > 0 }
+    { key: 'predict_runs_exist', ok: (state.predict_runs || []).length > 0, desc: 'Mindestens ein Predict-Lauf durchgeführt' },
+    { key: 'predictions_present', ok: predictions.length > 0, desc: `Predictions vorhanden (aktuell: ${predictions.length})` },
+    { key: 'actionable_exist', ok: predictions.some(p => p.actionable), desc: 'Mindestens eine actionable Prediction (BUY_YES oder BUY_NO)' },
+    { key: 'brier_tracking', ok: brierSamples >= 1, desc: `Brier Score wird getrackt (${brierSamples} Outcomes erfasst${brierScore != null ? `, Score: ${Number(brierScore).toFixed(4)}` : ''})` },
   ];
   const step4Checks = [
-    { key: 'execution_runs_exist', ok: (state.execution_runs || []).length > 0 },
-    { key: 'paper_mode_set', ok: typeof state.step4_summary?.paper_mode === 'boolean' }
+    { key: 'execution_runs_exist', ok: (state.execution_runs || []).length > 0, desc: 'Mindestens ein Execute-Lauf durchgeführt' },
+    { key: 'paper_mode_set', ok: typeof state.step4_summary?.paper_mode === 'boolean', desc: 'Paper/Live Modus definiert' },
+    { key: 'kelly_configured', ok: Number(cfg.kelly_fraction || 0) > 0 && Number(cfg.kelly_fraction || 0) <= 1, desc: `Kelly Fraction konfiguriert (aktuell: ${cfg.kelly_fraction || '?'})` },
+    { key: 'no_correlation_conflicts', ok: Number(state.step4_summary?.correlation_blocked || 0) === 0 || !state.step4_summary, desc: `Keine korrelierten Trades blockiert (${state.step4_summary?.correlation_blocked || 0} geblockt)` },
   ];
   const step5Checks = [
-    { key: 'risk_runs_exist', ok: (state.risk_runs || []).length > 0 },
-    { key: 'risk_limits_set', ok: Number(cfg.max_pos_pct || 0) > 0 }
+    { key: 'risk_runs_exist', ok: (state.risk_runs || []).length > 0, desc: 'Mindestens ein Risk-Check durchgeführt' },
+    { key: 'risk_limits_set', ok: Number(cfg.max_pos_pct || 0) > 0 && Number(cfg.max_drawdown_pct || 0) > 0, desc: 'Risk-Limits konfiguriert (max_pos_pct + max_drawdown)' },
+    { key: 'drawdown_ok', ok: Number(state.risk?.drawdown_pct || 0) < Number(cfg.max_drawdown_pct || 0.08), desc: `Drawdown unter Limit (${(Number(state.risk?.drawdown_pct || 0) * 100).toFixed(1)}% < ${(Number(cfg.max_drawdown_pct || 0.08) * 100).toFixed(0)}%)` },
+    { key: 'compound_exists', ok: Boolean(state.compound_summary?.updated_at), desc: 'Compound/Learning Step wurde ausgeführt (Bot lernt aus Trades)' },
   ];
   return {
     step1: { progress_pct: toPct(step1Checks), checks: step1Checks, readiness },

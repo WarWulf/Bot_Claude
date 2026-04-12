@@ -22,6 +22,8 @@ import express from 'express';
 import cors from 'cors';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
 
 import { loadState, saveState, logLine, buildScannerHealth, maskProviderKeys, nextId, defaultState } from './appState.js';
 import { loadSkillProfiles } from './stepRegistry.js';
@@ -131,7 +133,7 @@ app.post('/api/research/scan-recommendations', async (req, res) => {
 // --- Predict ---
 app.post('/api/predict/run', async (_, res) => { try { res.json({ ok: true, ...await runPredictStep(loadState()) }); } catch (e) { res.status(500).json({ ok: false, message: e.message }); } });
 app.get('/api/predict/status', (_, res) => { const s = loadState(); res.json({ summary: s.step3_summary || {}, predictions: (s.predictions || []).slice(0, 20), correlations: s.correlations || [], calibration: computeBrierCalibration(s.prediction_outcomes || []) }); });
-app.post('/api/predict/outcomes', (req, res) => { const s = loadState(); const outcomes = recordPredictionOutcomes(s, req.body?.items || []); res.json({ ok: true, calibration: computeBrierCalibration(outcomes) }); });
+// predict/outcomes moved below with Brier Score auto-calc
 app.get('/api/predict/calibration', (_, res) => { const s = loadState(); res.json({ ok: true, ...computeBrierCalibration(s.prediction_outcomes || []) }); });
 app.get('/api/predict/correlations', (_, res) => { const s = loadState(); res.json({ ok: true, ...detectCorrelatedGroups(s.predictions || []) }); });
 
@@ -170,6 +172,7 @@ app.post('/api/save', (req, res) => {
   logLine(state, 'info', 'settings saved');
   saveState(state);
   ensureScanScheduler();
+  ensurePipelineScheduler();
   applyWebsocketConfig();
   res.json({ ok: true });
 });
@@ -288,6 +291,186 @@ app.post('/api/run-once', async (_, res) => {
 
 // --- Start ---
 ensureScanScheduler();
+ensurePipelineScheduler();
 applyWebsocketConfig();
 setInterval(flushWsTicksBuffer, 2000);
 app.listen(port, () => console.log(`Backend listening on http://0.0.0.0:${port}`));
+
+// Auto-pipeline: runs full pipeline every scan interval (if auto_running enabled)
+let pipelineTimer = null;
+function ensurePipelineScheduler() {
+  const state = loadState();
+  const cfg = state.config || {};
+  if (pipelineTimer) clearInterval(pipelineTimer);
+  if (!cfg.auto_running) return;
+  const everyMs = Math.max(15, Number(cfg.scan_interval_minutes || 15)) * 60 * 1000;
+  console.log(`[pipeline] Auto-pipeline enabled, interval ${cfg.scan_interval_minutes || 15} min`);
+  pipelineTimer = setInterval(async () => {
+    const s = loadState();
+    if (s.config?.kill_switch) { logLine(s, 'info', 'auto-pipeline skipped: kill switch active'); saveState(s); return; }
+    try {
+      logLine(s, 'info', 'auto-pipeline started'); saveState(s);
+      await runSkillPipeline({ runScan: true, runResearch: true, runPredict: true, runExecute: true, runRisk: true });
+      // After pipeline, run compound/learning step
+      await runCompoundStep();
+    } catch (e) {
+      const s2 = loadState(); logLine(s2, 'error', `auto-pipeline failed: ${e.message}`); saveState(s2);
+    }
+  }, everyMs);
+}
+
+// Compound/Learning step: analyze results and write lessons
+async function runCompoundStep() {
+  const state = loadState();
+  const trades = state.trades || [];
+  const closedTrades = trades.filter(t => t.status !== 'OPEN' && t.netPnlUsd !== undefined);
+  if (!closedTrades.length) return;
+
+  // Calculate performance metrics
+  const wins = closedTrades.filter(t => Number(t.netPnlUsd || 0) > 0).length;
+  const losses = closedTrades.filter(t => Number(t.netPnlUsd || 0) < 0).length;
+  const totalPnl = closedTrades.reduce((s, t) => s + Number(t.netPnlUsd || 0), 0);
+  const winRate = closedTrades.length ? wins / closedTrades.length : 0;
+  const grossProfit = closedTrades.filter(t => Number(t.netPnlUsd || 0) > 0).reduce((s, t) => s + Number(t.netPnlUsd || 0), 0);
+  const grossLoss = Math.abs(closedTrades.filter(t => Number(t.netPnlUsd || 0) < 0).reduce((s, t) => s + Number(t.netPnlUsd || 0), 0));
+  const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : Infinity;
+
+  state.compound_summary = {
+    updated_at: new Date().toISOString(),
+    total_trades: closedTrades.length,
+    wins, losses, winRate: Number(winRate.toFixed(4)),
+    totalPnl: Number(totalPnl.toFixed(2)),
+    profitFactor: profitFactor === Infinity ? 'Infinity' : Number(profitFactor.toFixed(4)),
+  };
+
+  // Write losses to failure_log.md
+  const recentLosses = closedTrades.filter(t => Number(t.netPnlUsd || 0) < 0).slice(0, 5);
+  if (recentLosses.length) {
+    try {
+      const logDir = resolvePath(process.cwd(), 'predict-market-bot', 'references');
+      mkdirSync(logDir, { recursive: true });
+      const logPath = resolvePath(logDir, 'failure_log.md');
+      const entries = recentLosses.map(t => {
+        const date = (t.time || new Date().toISOString()).slice(0, 10);
+        return `### ${date} — ${(t.title || t.market_id || 'unknown').slice(0, 60)}\n- **Result:** Loss of $${Math.abs(Number(t.netPnlUsd || 0)).toFixed(2)}\n- **Direction:** ${t.direction || '?'}\n- **Root cause:** needs classification\n- **Lesson:** auto-logged by compound step\n`;
+      }).join('\n');
+      // Only append if not already logged
+      const existing = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
+      const newEntries = recentLosses.filter(t => !existing.includes(t.market_id || 'xxx'));
+      if (newEntries.length) {
+        const newText = newEntries.map(t => {
+          const date = (t.time || new Date().toISOString()).slice(0, 10);
+          return `\n### ${date} — ${(t.title || t.market_id || 'unknown').slice(0, 60)}\n- **Result:** Loss of $${Math.abs(Number(t.netPnlUsd || 0)).toFixed(2)}\n- **Direction:** ${t.direction || '?'}\n- **Root cause:** needs classification\n- **Lesson:** auto-logged\n`;
+        }).join('');
+        appendFileSync(logPath, newText, 'utf8');
+        logLine(state, 'info', `compound: ${newEntries.length} losses logged to failure_log.md`);
+      }
+    } catch (e) { logLine(state, 'warning', `compound: failed to write failure_log: ${e.message}`); }
+  }
+
+  // Recalculate Brier Score
+  recalcBrierScore(state);
+  state.compound_summary.brier_score = state.brier_score;
+  state.compound_summary.brier_samples = state.brier_samples;
+
+  logLine(state, 'info', `compound: ${closedTrades.length} trades, WR=${(winRate*100).toFixed(0)}%, PF=${state.compound_summary.profitFactor}, Brier=${state.brier_score??'n/a'}`);
+  saveState(state);
+}
+
+app.post('/api/compound/run', async (_, res) => {
+  try { await runCompoundStep(); res.json({ ok: true, summary: loadState().compound_summary }); }
+  catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+app.get('/api/compound/status', (_, res) => res.json({ ok: true, summary: loadState().compound_summary || {} }));
+
+// ═══════════════════════════════════════════
+// BRIER SCORE — automatisch berechnen
+// ═══════════════════════════════════════════
+// Was ist der Brier Score?
+// Er misst wie gut deine Vorhersagen sind.
+// Formel: BS = (1/n) × Σ(vorhergesagt - tatsächlich)²
+// Beispiel: Du sagst 70% Wahrscheinlichkeit, Event tritt ein → (0.7 - 1)² = 0.09
+// Beispiel: Du sagst 70%, Event tritt NICHT ein → (0.7 - 0)² = 0.49
+// Perfekt = 0.0, Münzwurf = 0.25, Schlecht > 0.25
+// Ziel: unter 0.25 bleiben!
+
+function recalcBrierScore(state) {
+  const outcomes = state.prediction_outcomes || [];
+  if (!outcomes.length) { state.brier_score = null; return; }
+  const ready = outcomes.filter(x => Number.isFinite(Number(x.predicted_prob)) && (x.outcome === 0 || x.outcome === 1));
+  if (!ready.length) { state.brier_score = null; return; }
+  const score = ready.reduce((sum, x) => sum + ((Number(x.predicted_prob) - Number(x.outcome)) ** 2), 0) / ready.length;
+  state.brier_score = Number(score.toFixed(5));
+  state.brier_samples = ready.length;
+}
+
+// Auto-recalc Brier when outcomes are recorded
+const origRecordOutcomes = recordPredictionOutcomes;
+// Override the predict outcomes endpoint to auto-calc Brier
+app.post('/api/predict/outcomes', (req, res) => {
+  const s = loadState();
+  origRecordOutcomes(s, req.body?.items || []);
+  recalcBrierScore(s);
+  saveState(s);
+  const cal = computeBrierCalibration(s.prediction_outcomes || []);
+  res.json({ ok: true, brier_score: s.brier_score, brier_samples: s.brier_samples, calibration: cal });
+});
+
+// ═══════════════════════════════════════════
+// NIGHTLY REVIEW — einmal täglich um Mitternacht UTC
+// ═══════════════════════════════════════════
+// Was macht der Nightly Review?
+// 1. Analysiert ALLE Trades des Tages
+// 2. Berechnet Tages-Performance (Win Rate, P&L, Profit Factor)
+// 3. Aktualisiert den Brier Score
+// 4. Loggt eine Zusammenfassung
+// 5. Setzt den täglichen Verlust-Zähler zurück
+
+let lastNightlyDate = '';
+function checkNightlyReview() {
+  const today = new Date().toISOString().slice(0, 10);
+  if (today === lastNightlyDate) return; // schon gelaufen heute
+  const hour = new Date().getUTCHours();
+  if (hour !== 0) return; // nur um Mitternacht UTC
+
+  lastNightlyDate = today;
+  const state = loadState();
+  const trades = state.trades || [];
+  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const todayTrades = trades.filter(t => (t.time || '').startsWith(yesterday));
+
+  const wins = todayTrades.filter(t => Number(t.netPnlUsd || 0) > 0).length;
+  const losses = todayTrades.filter(t => Number(t.netPnlUsd || 0) < 0).length;
+  const pnl = todayTrades.reduce((s, t) => s + Number(t.netPnlUsd || 0), 0);
+
+  // Recalc Brier Score
+  recalcBrierScore(state);
+
+  // Reset daily loss counter
+  if (state.risk) state.risk.daily_realized_pnl = 0;
+
+  // Log the review
+  state.nightly_reviews = state.nightly_reviews || [];
+  state.nightly_reviews.unshift({
+    date: yesterday,
+    trades: todayTrades.length,
+    wins, losses,
+    pnl: Number(pnl.toFixed(2)),
+    brier_score: state.brier_score,
+    brier_samples: state.brier_samples,
+  });
+  state.nightly_reviews = state.nightly_reviews.slice(0, 90); // 90 Tage behalten
+
+  logLine(state, 'info', `nightly review (${yesterday}): ${todayTrades.length} trades, ${wins}W/${losses}L, P&L=$${pnl.toFixed(2)}, Brier=${state.brier_score ?? 'n/a'}`);
+  saveState(state);
+}
+
+// Check every hour
+setInterval(checkNightlyReview, 60 * 60 * 1000);
+// Also check on startup
+setTimeout(checkNightlyReview, 5000);
+
+app.get('/api/nightly/status', (_, res) => {
+  const s = loadState();
+  res.json({ ok: true, reviews: (s.nightly_reviews || []).slice(0, 30), brier_score: s.brier_score, brier_samples: s.brier_samples });
+});
