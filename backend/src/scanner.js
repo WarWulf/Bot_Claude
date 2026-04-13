@@ -58,11 +58,17 @@ export function scanAndRankMarkets(markets, cfg) {
   // Category filter — let user focus on finance, politics etc.
   const categoryFilter = String(cfg.scanner_market_categories || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
   const CATEGORY_KEYWORDS = {
-    finance: ['stock','s&p','nasdaq','dow','treasury','fed','interest rate','gdp','inflation','earnings','ipo','market cap','bitcoin','btc','eth','crypto','forex'],
-    crypto: ['bitcoin','btc','eth','ethereum','crypto','solana','sol','defi','nft','blockchain','binance','coinbase'],
-    politics: ['election','president','congress','senate','governor','vote','ballot','democrat','republican','trump','biden','legislation','bill','law','supreme court'],
-    sports: ['nfl','nba','mlb','nhl','fifa','world cup','super bowl','championship','playoff','soccer','football','basketball','baseball','tennis','f1','ufc'],
-    weather: ['temperature','rain','snow','hurricane','tornado','weather','climate','heat','cold','storm'],
+    finance: ['stock','s&p','nasdaq','dow','treasury','fed','interest rate','gdp','inflation','earnings','ipo','market cap','forex','bond','yield','recession','unemployment','jobs','cpi','ppi','fomc'],
+    crypto: ['bitcoin','btc','eth','ethereum','crypto','solana','sol','defi','nft','blockchain','binance','coinbase','dogecoin','xrp','cardano','polygon','matic'],
+    politics: ['election','president','congress','senate','governor','vote','ballot','democrat','republican','trump','biden','legislation','bill','law','supreme court','impeach','primary','nomination','cabinet','veto','executive order'],
+    sports: ['nfl','nba','mlb','nhl','fifa','world cup','super bowl','championship','playoff','soccer','football','basketball','baseball','tennis','f1','ufc','olympics','grand slam','premier league','champions league'],
+    weather: ['temperature','rain','snow','hurricane','tornado','weather','climate','heat','cold','storm','flood','wildfire','drought','celsius','fahrenheit'],
+    tech: ['ai ','artificial intelligence','openai','google','apple','microsoft','meta','nvidia','spacex','launch','rocket','semiconductor','chip','quantum','robot'],
+    entertainment: ['oscar','grammy','emmy','movie','film','album','concert','netflix','disney','spotify','box office','streaming','award','celebrity','tv show'],
+    economy: ['gdp','unemployment','trade','tariff','sanction','export','import','supply chain','housing','real estate','mortgage','debt','default','bankruptcy','stimulus'],
+    legal: ['trial','verdict','guilty','lawsuit','indictment','ruling','judge','court','settlement','prosecution','appeal','subpoena','testimony'],
+    science: ['nasa','space','mars','climate change','vaccine','fda','drug','pharmaceutical','pandemic','outbreak','earthquake','volcano','species'],
+    geopolitics: ['war','conflict','nato','china','russia','ukraine','taiwan','iran','israel','gaza','north korea','sanctions','ceasefire','treaty','alliance'],
   };
 
   return markets

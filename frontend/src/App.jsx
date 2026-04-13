@@ -155,7 +155,6 @@ export default function App(){
       {/* STATUS PILLS */}
       <div style={{display:'flex',flexWrap:'wrap',gap:5,marginBottom:12}}>
         <Pill ok={health?.status==='ok'} label={`Backend: ${health?.status||'?'}`}/>
-        <Pill ok={step1Pct>=100} label={`Step1: ${fmt(step1Pct,0)}%`}/>
         <Pill ok={srcStatus.any} label={srcStatus.any?'News: ok':'News: fehlt'}/>
         <Pill ok={srcStatus.llm} label={srcStatus.llm?'LLM: ok':'LLM: fehlt'}/>
         <Pill ok={!cfg.kill_switch} label={cfg.kill_switch?'KILL AKTIV':'Kill: aus'}/>
@@ -211,6 +210,31 @@ export default function App(){
             {exchangeBalance?.balances?.kalshi?.error&&<span style={{fontSize:11,...mono,color:C.red}}>Fehler: {exchangeBalance.balances.kalshi.error}</span>}
           </div>
         </Card>
+
+        {/* Offene Trades */}
+        {openTrades.length>0&&<Card title={`📈 Laufende Trades (${openTrades.length})`} help="Alle aktuell offenen Paper-Trades. Zeigt wann eröffnet, wie lange offen, Restlaufzeit des Marktes, Edge und Einsatz.">
+          {openTrades.map((t,i)=>{
+            const openedAt=new Date(t.time||Date.now());
+            const hoursOpen=Math.round((Date.now()-openedAt.getTime())/3600000);
+            const daysOpen=Math.floor(hoursOpen/24);
+            const openStr=`${openedAt.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})} ${openedAt.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})}`;
+            const durationStr=daysOpen>0?`${daysOpen}T ${hoursOpen%24}h`:`${hoursOpen}h`;
+            return<div key={i} style={{padding:'7px 0',borderBottom:`1px solid ${C.border}11`}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <span style={{fontSize:12,flex:1}}>{(t.title||t.market_id||'').slice(0,55)}</span>
+                <span style={{fontSize:11,...mono,fontWeight:600,color:t.direction==='BUY_YES'?C.green:C.red}}>{t.direction}</span>
+              </div>
+              <div style={{display:'flex',gap:10,fontSize:10,...mono,color:C.muted,marginTop:3,flexWrap:'wrap'}}>
+                <span title="Eröffnet am">📅 Geöffnet: {openStr}</span>
+                <span title="Wie lange schon offen">⏱ Läuft seit: {durationStr}</span>
+                {Number(t.days_to_expiry||0)>0&&<span title="Restlaufzeit des Marktes">🏁 Markt endet in: {t.days_to_expiry}T</span>}
+                <span title="Einsatz">💰 ${fmt(t.positionUsd,0)}</span>
+                <span title="Edge bei Eröffnung">Edge: {fmt(Number(t.edge||0)*100,1)}%</span>
+                <span title="Plattform" style={{fontSize:9,padding:'1px 4px',borderRadius:3,background:t.platform==='kalshi'?`${C.purple}20`:`${C.cyan}20`,color:t.platform==='kalshi'?C.purple:C.cyan}}>{t.platform||t.source}</span>
+              </div>
+            </div>;})}
+        </Card>}
+        {!openTrades.length&&trades.length===0&&<Card help="Noch keine Trades. Starte die Full Pipeline oben."><div style={{color:C.muted,fontSize:12,textAlign:'center',padding:8}}>Noch keine Trades. Starte die Pipeline.</div></Card>}
 
         {/* Verbindungen */}
         <Card title="Verbindungen" help="Grün = funktioniert. Rot = fehlt. Du brauchst mindestens eine Nachrichtenquelle (RSS geht sofort). Für die Börsen brauchst du API-Keys (siehe Einstellungen).">
@@ -390,6 +414,7 @@ export default function App(){
             <span style={{flex:1}}>{m.question||m.market}</span>
             <div style={{display:'flex',gap:8,fontSize:10,...mono,color:C.muted,alignItems:'center'}}>
               <span style={{fontSize:9,padding:'2px 6px',borderRadius:3,background:m.platform==='kalshi'?`${C.purple}20`:`${C.cyan}20`,color:m.platform==='kalshi'?C.purple:C.cyan}}>{m.platform}</span>
+              {m.category&&m.category!=='other'&&<span style={{fontSize:9,padding:'2px 5px',borderRadius:3,background:`${C.amber}15`,color:C.amber}}>{m.category}</span>}
               <span title="Marktpreis">P:{fmt(m.market_price,2)}</span><span title="Volumen">V:{Number(m.volume||0).toLocaleString()}</span>
             </div>
           </div>)}
@@ -488,11 +513,26 @@ export default function App(){
           </div>)}
         </Card>}
 
-        {openTrades.length>0&&<Card title={`Offene Positionen (${openTrades.length})`} help="Alle aktuell laufenden Trades.">
-          {openTrades.map((t,i)=><div key={i} style={{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:`1px solid ${C.border}11`,fontSize:11,...mono}}>
-            <span style={{color:C.text}}>{(t.title||t.market_id||'').slice(0,45)}</span>
-            <div style={{display:'flex',gap:8,color:C.muted}}><span style={{color:t.direction==='BUY_YES'?C.green:C.red}}>{t.direction}</span><span>${fmt(t.positionUsd,0)}</span></div>
-          </div>)}
+        {openTrades.length>0&&<Card title={`Offene Positionen (${openTrades.length})`} help="Alle aktuell laufenden Trades. Zeigt wie lange offen, Restlaufzeit, Edge und Einsatz.">
+          {openTrades.map((t,i)=>{
+            const openedAt=new Date(t.time||Date.now());
+            const hoursOpen=Math.round((Date.now()-openedAt.getTime())/3600000);
+            const daysOpen=Math.floor(hoursOpen/24);
+            const durationStr=daysOpen>0?`${daysOpen}T ${hoursOpen%24}h`:`${hoursOpen}h`;
+            return<div key={i} style={{padding:'6px 0',borderBottom:`1px solid ${C.border}11`}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <span style={{fontSize:12,flex:1}}>{(t.title||t.market_id||'').slice(0,55)}</span>
+                <span style={{fontSize:11,...mono,fontWeight:600,color:t.direction==='BUY_YES'?C.green:C.red}}>{t.direction}</span>
+              </div>
+              <div style={{display:'flex',gap:10,fontSize:10,...mono,color:C.muted,marginTop:2}}>
+                <span title="Einsatz">💰${fmt(t.positionUsd,0)}</span>
+                <span title="Edge bei Eröffnung">Edge:{fmt(Number(t.edge||0)*100,1)}%</span>
+                <span title="Confidence">Conf:{fmt(Number(t.confidence||0)*100,0)}%</span>
+                <span title="Wie lange schon offen">⏱{durationStr}</span>
+                {Number(t.days_to_expiry||0)>0&&<span title="Restlaufzeit des Marktes">📅{t.days_to_expiry}T</span>}
+                <span title="Plattform" style={{fontSize:9,padding:'1px 4px',borderRadius:3,background:t.platform==='kalshi'?`${C.purple}20`:`${C.cyan}20`,color:t.platform==='kalshi'?C.purple:C.cyan}}>{t.platform||t.source}</span>
+              </div>
+            </div>;})}
         </Card>}
         {!openTrades.length&&<div style={{color:C.muted,fontSize:12,padding:10}}>Keine offenen Positionen.</div>}
       </div>}
@@ -543,7 +583,7 @@ export default function App(){
               {key:'scanner_active_to_utc',label:'Aktiv bis (UTC Stunde)',rec:24,desc:'Scanner nur bis zu dieser Stunde aktiv.',why:'24 = rund um die Uhr.'},
               {key:'scanner_history_retention_days',label:'History Tage',rec:14,desc:'Wie lange Preishistorie gespeichert wird.',why:'14 Tage für 7-Tage-Schnitt.'},
               {key:'scanner_ws_enabled',label:'WebSocket aktiv',rec:false,desc:'Live-Orderbook Updates über WebSocket.',why:'Optional, nur für fortgeschrittene Setups.',type:'bool'},
-              {key:'scanner_market_categories',label:'Markt-Kategorien',rec:'',desc:'Nur bestimmte Themen scannen (komma-getrennt). Z.B.: finance, crypto, politics, sports, weather. Leer = alle.',why:'Wenn du dich mit Aktien/Finance auskennst, setze auf "finance,crypto" für deinen Vorteil.',type:'text'},
+              {key:'scanner_market_categories',label:'Markt-Kategorien',rec:'',desc:'Nur bestimmte Themen scannen (komma-getrennt). Leer = alle Märkte.',why:'Verfügbar: finance, crypto, politics, sports, weather, tech, entertainment, economy, legal, science, geopolitics. Z.B. "finance,crypto,economy" für Finanz-Fokus.',type:'text'},
             ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
           </Card>
           {/* Research */}

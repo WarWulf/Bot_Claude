@@ -4,6 +4,27 @@ import crypto from 'node:crypto';
 import { loadState } from './appState.js';
 import { fetchWithRetry, pushLiveComm } from './utils.js';
 
+// Auto-detect market category from question text
+function detectCategory(question) {
+  const q = (question || '').toLowerCase();
+  const cats = {
+    finance: ['stock','s&p','nasdaq','dow','treasury','fed ','interest rate','gdp','inflation','earnings','ipo','forex','bond','yield','recession','jobs report','cpi','fomc'],
+    crypto: ['bitcoin','btc','eth','ethereum','crypto','solana','dogecoin','xrp','coinbase','binance'],
+    politics: ['election','president','congress','senate','governor','vote','trump','biden','democrat','republican','nomination','impeach'],
+    sports: ['nfl','nba','mlb','nhl','fifa','super bowl','championship','playoff','soccer','football','basketball','baseball','tennis','f1','ufc','olympics'],
+    weather: ['temperature','rain','snow','hurricane','tornado','weather','storm','flood','wildfire'],
+    tech: ['ai ','openai','google','apple','microsoft','nvidia','spacex','launch','semiconductor','quantum'],
+    entertainment: ['oscar','grammy','emmy','movie','film','netflix','disney','streaming','award'],
+    economy: ['tariff','sanction','trade war','housing','mortgage','unemployment','gdp','supply chain'],
+    legal: ['trial','verdict','guilty','lawsuit','indictment','ruling','court','settlement'],
+    geopolitics: ['war','conflict','nato','china','russia','ukraine','taiwan','iran','israel','ceasefire'],
+  };
+  for (const [cat, keywords] of Object.entries(cats)) {
+    if (keywords.some(kw => q.includes(kw))) return cat;
+  }
+  return 'other';
+}
+
 export function buildPolymarketAuthHeaders() {
   const state = loadState();
   const provider = state.providers?.polymarket || {};
@@ -31,15 +52,23 @@ export function buildKalshiAuthHeaders(path = '/trade-api/v2/markets') {
 
 export async function fetchPolymarketMarkets(limit = 100) {
   const cfg = loadState().config || {};
-  const resp = await fetchWithRetry(
-    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=200',
-    {},
-    { label: 'polymarket', retries: cfg.scanner_http_retries, timeoutMs: cfg.scanner_http_timeout_ms }
-  );
-  const data = await resp.json();
-  const rawItems = Array.isArray(data) ? data : (data?.data || []);
+  // Fetch more markets with pagination for better category diversity
+  const allMarkets = [];
+  for (let offset = 0; offset < 400; offset += 200) {
+    try {
+      const resp = await fetchWithRetry(
+        `https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=200&offset=${offset}`,
+        {},
+        { label: 'polymarket', retries: cfg.scanner_http_retries, timeoutMs: cfg.scanner_http_timeout_ms }
+      );
+      const data = await resp.json();
+      const rawItems = Array.isArray(data) ? data : (data?.data || []);
+      if (!rawItems.length) break;
+      allMarkets.push(...rawItems);
+    } catch { break; }
+  }
 
-  return rawItems
+  return allMarkets
     .map((item) => {
       const question = String(item.question || item.title || item.slug || '').trim();
       let price = Number(item.probability ?? item.lastTradePrice ?? item.price);
@@ -59,7 +88,8 @@ export async function fetchPolymarketMarkets(limit = 100) {
         volume: Number(item.volume || 0),
         volume_7d_avg: Number(item.volumeNum || item.volume || 0),
         liquidity: Number(item.liquidity || 0),
-        days_to_expiry: Number(item.daysToExpiration || item.days_to_expiry || 7)
+        days_to_expiry: Number(item.daysToExpiration || item.days_to_expiry || 7),
+        category: detectCategory(question),
       };
     })
     .filter(Boolean)
@@ -69,12 +99,25 @@ export async function fetchPolymarketMarkets(limit = 100) {
 export async function fetchKalshiMarkets(limit = 100) {
   const headers = buildKalshiAuthHeaders('/trade-api/v2/markets');
   const cfg = loadState().config || {};
-  const resp = await fetchWithRetry(
-    'https://api.elections.kalshi.com/trade-api/v2/markets',
-    { headers },
-    { label: 'kalshi', retries: cfg.scanner_http_retries, timeoutMs: cfg.scanner_http_timeout_ms }
-  );
-  const data = await resp.json();
+  // Try the main Kalshi API first, fallback to elections
+  let data;
+  try {
+    const resp = await fetchWithRetry(
+      'https://trading-api.kalshi.com/trade-api/v2/markets?limit=200&status=open',
+      { headers },
+      { label: 'kalshi', retries: cfg.scanner_http_retries, timeoutMs: cfg.scanner_http_timeout_ms }
+    );
+    data = await resp.json();
+  } catch {
+    try {
+      const resp = await fetchWithRetry(
+        'https://api.elections.kalshi.com/trade-api/v2/markets?limit=200&status=open',
+        { headers },
+        { label: 'kalshi-elections', retries: 1, timeoutMs: cfg.scanner_http_timeout_ms }
+      );
+      data = await resp.json();
+    } catch { data = { markets: [] }; }
+  }
   const items = data?.markets || [];
 
   return items.slice(0, limit).map((item) => {
@@ -98,7 +141,8 @@ export async function fetchKalshiMarkets(limit = 100) {
       volume: Number(item.volume || 0),
       volume_7d_avg: Number(item.volume_7d || item.volume || 0),
       liquidity: Number(item.open_interest || 0),
-      days_to_expiry: Number(item.days_to_expiry || 7)
+      days_to_expiry: Number(item.days_to_expiry || 7),
+      category: detectCategory(String(item.title || item.subtitle || '')),
     };
   });
 }

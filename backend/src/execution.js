@@ -41,11 +41,28 @@ export async function runExecutionStep(state = loadState()) {
     // Check: max concurrent positions
     if (openTrades.length + openedTrades >= Number(state.config?.max_concurrent_positions || 15)) { skipped += 1; riskBlocked += 1; continue; }
 
-    const order = { id: nextId(state.orders), time: new Date().toISOString(), market_id: p.market_id, question: p.question, direction: p.direction, confidence: Number(p.confidence || 0), edge: Number(p.edge || 0), positionUsd, status: state.config?.paper_mode ? 'PAPER_EXECUTED' : 'READY_TO_ROUTE' };
+    // Find original market data for expiry info
+    const marketData = (state.scan_results || []).find(m => String(m.id) === String(p.market_id)) || {};
+
+    const order = { id: nextId(state.orders), time: new Date().toISOString(), market_id: p.market_id, question: p.question, direction: p.direction, confidence: Number(p.confidence || 0), edge: Number(p.edge || 0), model_prob: Number(p.model_prob || 0), market_prob: Number(p.market_prob || 0), positionUsd, status: state.config?.paper_mode ? 'PAPER_EXECUTED' : 'READY_TO_ROUTE' };
     state.orders.unshift(order);
     executed += 1;
     if (state.config?.paper_mode) {
-      state.trades.unshift({ id: nextId(state.trades), order_id: order.id, time: order.time, market_id: p.market_id, title: p.question, source: p.platform || p.source || 'unknown', direction: p.direction, status: 'OPEN', positionUsd, netPnlUsd: 0 });
+      state.trades.unshift({
+        id: nextId(state.trades), order_id: order.id, time: order.time,
+        market_id: p.market_id, title: p.question,
+        source: p.platform || p.source || 'unknown',
+        direction: p.direction, status: 'OPEN',
+        positionUsd, netPnlUsd: 0,
+        // Extra info for display
+        edge: Number(p.edge || 0),
+        confidence: Number(p.confidence || 0),
+        model_prob: Number(p.model_prob || 0),
+        market_prob: Number(p.market_prob || 0),
+        days_to_expiry: Number(marketData.days_to_expiry || 0),
+        platform: marketData.platform || p.platform || 'unknown',
+        category: marketData.category || '',
+      });
       openedTrades += 1;
       openExposureUsd += positionUsd;
       openMarketIds.add(String(p.market_id));
