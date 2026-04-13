@@ -52,21 +52,17 @@ export function buildKalshiAuthHeaders(path = '/trade-api/v2/markets') {
 
 export async function fetchPolymarketMarkets(limit = 100) {
   const cfg = loadState().config || {};
-  // Fetch more markets with pagination for better category diversity
   const allMarkets = [];
-  for (let offset = 0; offset < 400; offset += 200) {
-    try {
-      const resp = await fetchWithRetry(
-        `https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=200&offset=${offset}`,
-        {},
-        { label: 'polymarket', retries: cfg.scanner_http_retries, timeoutMs: cfg.scanner_http_timeout_ms }
-      );
-      const data = await resp.json();
-      const rawItems = Array.isArray(data) ? data : (data?.data || []);
-      if (!rawItems.length) break;
-      allMarkets.push(...rawItems);
-    } catch { break; }
-  }
+  try {
+    const resp = await fetchWithRetry(
+      'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=200',
+      {},
+      { label: 'polymarket', retries: cfg.scanner_http_retries, timeoutMs: cfg.scanner_http_timeout_ms }
+    );
+    const data = await resp.json();
+    const rawItems = Array.isArray(data) ? data : (data?.data || []);
+    allMarkets.push(...rawItems);
+  } catch (e) { /* logged by fetchWithRetry */ }
 
   return allMarkets
     .map((item) => {
@@ -115,17 +111,17 @@ export async function fetchKalshiMarkets(limit = 100) {
   const cfg = loadState().config || {};
   // Try multiple Kalshi endpoints for maximum market coverage
   const endpoints = [
-    'https://trading-api.kalshi.com/trade-api/v2/markets?limit=200&status=open',
-    'https://api.elections.kalshi.com/trade-api/v2/markets?limit=200&status=open',
-    'https://demo-api.kalshi.co/trade-api/v2/markets?limit=200&status=open',
+    { url: 'https://trading-api.kalshi.com/trade-api/v2/markets?limit=200&status=open', label: 'kalshi', silent: true },
+    { url: 'https://api.elections.kalshi.com/trade-api/v2/markets?limit=200&status=open', label: 'kalshi-elections', silent: false },
+    { url: 'https://demo-api.kalshi.co/trade-api/v2/markets?limit=200&status=open', label: 'kalshi-demo', silent: true },
   ];
   let allItems = [];
-  for (const url of endpoints) {
+  for (const ep of endpoints) {
     try {
-      const resp = await fetchWithRetry(url, { headers }, { label: 'kalshi', retries: 1, timeoutMs: Number(cfg.scanner_http_timeout_ms || 8000) });
+      const resp = await fetchWithRetry(ep.url, { headers }, { label: ep.label, retries: 1, timeoutMs: Number(cfg.scanner_http_timeout_ms || 8000), silent: ep.silent });
       const data = await resp.json();
       const items = data?.markets || [];
-      if (items.length) { allItems = items; break; } // Use first endpoint that works
+      if (items.length) { allItems = items; break; }
     } catch { continue; }
   }
 

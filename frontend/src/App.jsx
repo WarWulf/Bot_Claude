@@ -5,7 +5,7 @@ const C={bg:'#0a0e17',card:'#111827',border:'#1e293b',green:'#22c55e',red:'#ef44
 const fmt=(v,d=2)=>{const n=Number(v);return Number.isNaN(n)?'-':n.toFixed(d);};
 const mono={fontFamily:'JetBrains Mono,monospace'};
 
-const ERR_HELP={'aborted':'LLM-Provider zu langsam. Erhöhe LLM Timeout (z.B. 30000ms).','http 401':'API-Key ungültig.','http 429':'Rate Limit! Zu viele Anfragen. Erhöhe "Delay zwischen Märkten" (z.B. 5000ms) oder reduziere "Top N" auf 5.','http 500':'Server-Fehler beim Provider.','ECONNREFUSED':'URL falsch oder Server nicht erreichbar.','fetch failed':'Netzwerk-Problem.','no_llm_provider':'Kein LLM konfiguriert.','llm_disabled':'LLM deaktiviert — Heuristik wird benutzt.'};
+const ERR_HELP={'aborted':'LLM-Provider zu langsam. Erhöhe LLM Timeout (z.B. 30000ms).','http 401':'API-Key ungültig oder fehlt.','http 403':'Zugriff blockiert. Reddit blockiert manchmal Bot-Zugriffe — kein Problem, andere Quellen liefern trotzdem.','http 429':'Rate Limit! Erhöhe "Delay zwischen Märkten" oder reduziere "Top N".','http 500':'Server-Fehler beim Provider.','ECONNREFUSED':'URL falsch oder Server nicht erreichbar.','fetch failed':'Netzwerk-Fehler. Einige Quellen sind vom VPS aus nicht erreichbar — normal.','no_llm_provider':'Kein LLM konfiguriert.','llm_disabled':'LLM deaktiviert — Heuristik wird benutzt.'};
 function helpErr(msg){const s=String(msg||'').toLowerCase();for(const[k,v]of Object.entries(ERR_HELP))if(s.includes(k.toLowerCase()))return v;return null;}
 function dirExplain(p){if(!p)return'';const e=Number(p.edge||0),m=Number(p.market_prob||0),mdl=Number(p.model_prob||0);
   if(p.direction==='BUY_YES')return`Bot: ${(mdl*100).toFixed(0)}% vs Markt: ${(m*100).toFixed(0)}% → Vorteil +${(e*100).toFixed(1)}%. Markt unterbewertet → YES kaufen.`;

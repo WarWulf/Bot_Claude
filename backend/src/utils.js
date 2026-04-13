@@ -52,6 +52,8 @@ export async function fetchWithRetry(url, options = {}, cfg = {}) {
   const retries = Math.max(0, Number(cfg.retries ?? 2));
   const timeoutMs = Math.max(1000, Number(cfg.timeoutMs ?? 8000));
   const baseDelayMs = Math.max(100, Number(cfg.baseDelayMs ?? 400));
+  const silent = Boolean(cfg.silent); // Don't log errors
+  const acceptStatuses = cfg.acceptStatuses || []; // e.g. [401,403] = don't throw on these
   let lastError = null;
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -59,12 +61,12 @@ export async function fetchWithRetry(url, options = {}, cfg = {}) {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const resp = await fetch(url, { ...options, signal: controller.signal });
-      if (!resp.ok) throw new Error(`${cfg.label || 'http'} http ${resp.status}`);
-      pushLiveComm('http_ok', { label: cfg.label || 'http', url: String(url).slice(0, 200), status: resp.status });
+      if (!resp.ok && !acceptStatuses.includes(resp.status)) throw new Error(`${cfg.label || 'http'} http ${resp.status}`);
+      if (!silent) pushLiveComm('http_ok', { label: cfg.label || 'http', url: String(url).slice(0, 120), status: resp.status });
       return resp;
     } catch (error) {
       lastError = error;
-      pushLiveComm('http_error', { label: cfg.label || 'http', url: String(url).slice(0, 200), message: String(error?.message || error || 'unknown') });
+      if (!silent) pushLiveComm('http_error', { label: cfg.label || 'http', url: String(url).slice(0, 120), message: String(error?.message || error || 'unknown') });
       if (attempt < retries) await wait(baseDelayMs * (attempt + 1));
     } finally {
       clearTimeout(timer);
