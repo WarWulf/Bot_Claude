@@ -14,11 +14,14 @@ export async function runRiskStep(state = loadState()) {
 
   // Track peak bankroll for drawdown
   state.risk = state.risk || {};
-  const peakBankroll = Math.max(Number(state.risk.peak_bankroll || bankroll), currentEquity);
+  // Sanity check: peak can never be more than 10x bankroll (reset if corrupted)
+  const oldPeak = Number(state.risk.peak_bankroll || 0);
+  const sanitizedPeak = (oldPeak > bankroll * 10 || oldPeak <= 0) ? currentEquity : oldPeak;
+  const peakBankroll = Math.max(sanitizedPeak, currentEquity);
   state.risk.peak_bankroll = peakBankroll;
 
   // Drawdown calculation
-  const drawdownPct = peakBankroll > 0 ? (peakBankroll - currentEquity) / peakBankroll : 0;
+  const drawdownPct = peakBankroll > 0 ? Math.max(0, (peakBankroll - currentEquity) / peakBankroll) : 0;
   state.risk.drawdown_pct = Number(drawdownPct.toFixed(4));
 
   // Daily P&L tracking

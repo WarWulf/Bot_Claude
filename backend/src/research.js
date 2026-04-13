@@ -159,11 +159,15 @@ export async function runResearchStep() {
   state.research_search_log = searchLog; // Store the search transparency log
   const sourceDomains = new Set(briefs.flatMap((b) => (b.sources || []).map((s) => s.domain).filter(Boolean)));
   const avgConfidence = briefs.length ? briefs.reduce((sum, b) => sum + Number(b.confidence || 0), 0) / briefs.length : 0;
-  const coverage = top.length ? briefs.filter((b) => (b.sources || []).some(s => s.source_type !== 'none')).length / top.length : 0;
-  const sourceBreakdown = briefs.flatMap((b) => b.sources || []).reduce((acc, s) => { acc[s.source_type || 'unknown'] = (acc[s.source_type || 'unknown'] || 0) + 1; return acc; }, {});
-  const paperReadyBriefs = briefs.filter((b) => Number(b.confidence || 0) >= 0.58 && Number((b.sources || []).length) >= 2).length;
+  // Coverage: how many briefs have at least one real source (not 'none')
+  const briefsWithSources = briefs.filter((b) => (b.sources || []).some(s => s.source_type && s.source_type !== 'none'));
+  const coverage = top.length ? briefsWithSources.length / top.length : 0;
+  // Source diversity: count unique source TYPES that are active (rss, reddit, newsapi etc.)
+  const activeSourceTypes = new Set(searchLog.sources_queried.map(s => s.type));
+  const sourceBreakdown = briefs.flatMap((b) => b.sources || []).reduce((acc, s) => { const t = s.source_type || 'unknown'; if (t !== 'none') acc[t] = (acc[t] || 0) + 1; return acc; }, {});
+  const paperReadyBriefs = briefs.filter((b) => Number(b.confidence || 0) >= 0.58 && (b.sources || []).some(s => s.source_type !== 'none')).length;
 
-  state.research_summary = { completed_at: new Date().toISOString(), analyzed_markets: briefs.length, avg_confidence: Number(avgConfidence.toFixed(3)), source_diversity: sourceDomains.size, coverage_pct: Number((coverage * 100).toFixed(1)), source_breakdown: sourceBreakdown, paper_ready_briefs: paperReadyBriefs, paper_ready_pct: Number((briefs.length ? (paperReadyBriefs / briefs.length) * 100 : 0).toFixed(1)), search_log: searchLog };
+  state.research_summary = { completed_at: new Date().toISOString(), analyzed_markets: briefs.length, avg_confidence: Number(avgConfidence.toFixed(3)), source_diversity: activeSourceTypes.size, matched_domains: sourceDomains.size, coverage_pct: Number((coverage * 100).toFixed(1)), source_breakdown: sourceBreakdown, paper_ready_briefs: paperReadyBriefs, paper_ready_pct: Number((briefs.length ? (paperReadyBriefs / briefs.length) * 100 : 0).toFixed(1)), search_log: searchLog, briefs_with_sources: briefsWithSources.length, briefs_without_sources: briefs.length - briefsWithSources.length };
   state.research_runs = state.research_runs || [];
   state.research_runs.unshift({ time: new Date().toISOString(), analyzed: briefs.length, summary: state.research_summary });
   state.research_runs = state.research_runs.slice(0, 50);

@@ -285,18 +285,25 @@ export default function App(){
                     c.key==='recent_scan_fresh'||c.key==='scan_freshness'?'Starte einen neuen Scan.':
                     c.key==='tradeable_target'||c.key==='tradeable_target_reached'?'Senke Min Volume + Min Liquidität (z.B. auf 200).':
                     c.key==='auth_configured_any'?'Trage API-Keys ein oder starte einen Scan.':
-                    c.key==='breaker_closed'?'Warte auf Cooldown oder prüfe die Verbindung.':
+                    c.key==='breaker_closed'||c.key==='breaker_closed_main'?'Warte auf Cooldown oder prüfe die Verbindung.':
+                    c.key==='scheduler_config_valid'?'Scan-Intervall muss zwischen 5 und 60 Minuten sein.':
+                    c.key==='breaker_config_valid'?'Setze Breaker Schwelle auf mind. 1 und Cooldown auf mind. 30s.':
+                    c.key==='scan_pipeline_ranked'?'Scanner kann Beispieldaten nicht ranken. Prüfe Markt-Kategorien — eventuell zu restriktiv.':
+                    c.key==='runtime_present'?'Backend neu starten.':
                     c.key==='research_runs_exist'||c.key==='briefs_present'?'Klicke "Research" nachdem der Scan Ergebnisse hat.':
-                    c.key==='source_diversity'?'Aktiviere mehr Quellen (RSS, Reddit) in den Einstellungen.':
-                    c.key==='predict_runs_exist'||c.key==='predictions_present'?'Klicke "Predict" nachdem Research Briefs da sind.':
-                    c.key==='actionable_exist'?'Kein Markt hat genug Edge. Min Edge senken oder mehr Märkte scannen.':
-                    c.key==='brier_tracking'?'Wird automatisch gefüllt wenn Märkte auslaufen.':
-                    c.key==='execution_runs_exist'?'Klicke "Execute" nachdem Predictions da sind.':
-                    c.key==='kelly_configured'?'Kelly Fraction in Einstellungen setzen (empf: 0.25).':
-                    c.key==='risk_runs_exist'?'Klicke "Risk" oder starte die Full Pipeline.':
-                    c.key==='risk_limits_set'?'Setze max_pos_pct und max_drawdown in den Einstellungen.':
-                    c.key==='drawdown_ok'?'Drawdown ist zu hoch! Neue Trades werden blockiert.':
-                    c.key==='compound_exists'?'Starte die Full Pipeline — Compound läuft am Ende automatisch.':
+                    c.key==='source_diversity'?'Keine Quelle aktiv. Aktiviere RSS oder Reddit in Einstellungen.':
+                    c.key==='coverage_present'?'Keine Headlines matchen die Märkte. Senke "Min Keyword Overlap" auf 1.':
+                    c.key==='avg_confidence'?'Confidence zu niedrig. Mehr Quellen aktivieren.':
+                    c.key==='predict_runs_exist'||c.key==='predictions_present'?'Klicke "Predict" nach Research.':
+                    c.key==='actionable_exist'?'Kein Markt hat genug Edge. Min Edge senken.':
+                    c.key==='brier_tracking'?'Kein Handlungsbedarf — füllt sich wenn Märkte auslaufen.':
+                    c.key==='execution_runs_exist'?'Klicke "Execute" nach Predict.':
+                    c.key==='kelly_configured'?'Kelly Fraction setzen (empf: 0.25).':
+                    c.key==='no_correlation_conflicts'?'Korrelierte Trades blockiert — Bot schützt sich.':
+                    c.key==='risk_runs_exist'?'Klicke "Risk" oder Full Pipeline.':
+                    c.key==='risk_limits_set'?'Setze max_pos_pct und max_drawdown.':
+                    c.key==='drawdown_ok'?'Drawdown zu hoch! Klicke "Trades Reset" zum Zurücksetzen.':
+                    c.key==='compound_exists'?'Full Pipeline starten — Compound läuft automatisch.':
                     'Prüfe die Einstellungen.'
                   }</div>}
                 </div>
