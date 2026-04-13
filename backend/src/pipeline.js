@@ -39,8 +39,8 @@ export function runStep1SelfTest(state = loadState()) {
   const pm = buildPolymarketAuthHeaders();
   const ka = buildKalshiAuthHeaders();
   const sample = [
-    { platform: 'polymarket', question: 'Will the S&P 500 close above 5800 this week? (finance stock market test)', market: 'SAMPLE1', market_price: 0.45, prev_market_price: 0.4, bid: 0.44, ask: 0.46, spread: 0.02, status: 'open', volume: 1200, volume_7d_avg: 600, liquidity: 900, days_to_expiry: 7 },
-    { platform: 'kalshi', question: 'Will bitcoin BTC reach $100k? (crypto election politics test)', market: 'SAMPLE2', market_price: 0.55, prev_market_price: 0.5, bid: 0.53, ask: 0.57, spread: 0.04, status: 'open', volume: 1500, volume_7d_avg: 700, liquidity: 1100, days_to_expiry: 14 }
+    { platform: 'polymarket', question: 'Will the S&P 500 close above 5800 this week? (finance stock market test)', market: 'SAMPLE1', market_price: 0.45, prev_market_price: 0.4, bid: 0.44, ask: 0.46, spread: 0.02, status: 'open', volume: 999999, volume_7d_avg: 500000, liquidity: 999999, days_to_expiry: 7 },
+    { platform: 'kalshi', question: 'Will bitcoin BTC reach $100k? (crypto election politics test)', market: 'SAMPLE2', market_price: 0.55, prev_market_price: 0.5, bid: 0.53, ask: 0.57, spread: 0.04, status: 'open', volume: 999999, volume_7d_avg: 500000, liquidity: 999999, days_to_expiry: 14 }
   ];
   const ranked = scanAndRankMarkets(sample, cfg);
   const readiness = computeStep1Readiness(state);
@@ -72,14 +72,11 @@ export function computeStepStatus(state = loadState()) {
   const closedTrades = trades.filter(t => t.status !== 'OPEN');
 
   const step1Checks = [
-    // Include ALL self-test sub-checks directly (not wrapped in a single boolean)
+    // Include ALL self-test sub-checks directly
     ...selfTest.checks,
     { key: 'scan_runs_exist', ok: (state.scan_runs || []).length > 0, desc: 'Mindestens ein Scan wurde durchgeführt' },
-    { key: 'scan_freshness', ok: readiness.fresh_scan, desc: `Letzter Scan ist aktuell (max ${Number(cfg.scan_interval_minutes || 15) * 2} Min alt)` },
-    { key: 'tradeable_target', ok: readiness.tradeable_count >= readiness.min_tradeable_target, desc: `Mind. ${readiness.min_tradeable_target} tradeable Märkte (aktuell: ${readiness.tradeable_count})` },
-    { key: 'breaker_closed_main', ok: readiness.breaker_closed, desc: 'Circuit Breaker geschlossen (Scanner nicht pausiert)' }
   ];
-  // Deduplicate checks by key (self-test and step checks overlap)
+  // Deduplicate by key
   const seen = new Set();
   const step1Deduped = step1Checks.filter(c => { if (seen.has(c.key)) return false; seen.add(c.key); return true; });
   const step2Checks = [

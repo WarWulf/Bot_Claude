@@ -561,7 +561,7 @@ export default function App(){
               {key:'research_source_x',label:'X/Twitter RSS',rec:false,desc:'Twitter via RSS-Bridge Feeds.',why:'Schnelle Sentiment-Daten, braucht RSS-Bridge URLs.',type:'bool'},
               {key:'research_x_rss_feeds',label:'X RSS Feed URLs',rec:'',desc:'Komma-getrennte RSS-Bridge URLs für Twitter.',why:'Z.B. über nitter oder RSS-Bridge.',type:'text'},
               {key:'research_max_headlines',label:'Max Headlines',rec:80,desc:'Maximale Anzahl gesammelter Headlines.',why:'80 reicht für gute Abdeckung.'},
-              {key:'research_min_keyword_overlap',label:'Min Keyword Overlap',rec:2,desc:'Mindest-Wortübereinstimmung zwischen Headline und Markt.',why:'2 filtert Fehlzuordnungen. 1 = zu viele false positives.'},
+              {key:'research_min_keyword_overlap',label:'Min Keyword Overlap',rec:1,desc:'Mindest-Wortübereinstimmung zwischen Headline und Markt.',why:'1 = ein gemeinsames Keyword reicht. 2 = strenger, weniger Treffer aber genauer.'},
               {key:'research_min_credibility',label:'Min Credibility',rec:0.4,desc:'Mindest-Glaubwürdigkeit der Quelle (0-1).',why:'0.4 lässt die meisten durch. Höher = nur Premium-Quellen.'},
             ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
           </Card>

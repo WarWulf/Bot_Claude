@@ -62,7 +62,7 @@ export function defaultState() {
       research_source_gdelt: false,
       research_gdelt_query: '(polymarket OR kalshi OR prediction market)',
       research_max_headlines: 80,
-      research_min_keyword_overlap: 2,
+      research_min_keyword_overlap: 1,
       research_min_credibility: 0.4,
       step3_min_edge: 0.03,
       step3_min_confidence: 0.55,
