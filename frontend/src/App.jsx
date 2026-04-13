@@ -111,7 +111,7 @@ export default function App(){
     const reddit=Boolean(cfg.research_source_reddit!==false);
     const newsapi=Boolean(cfg.research_source_newsapi&&String(cfg.research_newsapi_key||'').trim());
     const gdelt=Boolean(cfg.research_source_gdelt);
-    const llm=['openai','claude','gemini','ollama_cloud'].some(n=>{const p=state?.providers?.[n]||{};return p.enabled&&String(p.api_key||'').trim();});
+    const llm=['openai','claude','gemini','ollama_cloud','local_ollama','kimi_direct'].some(n=>{const p=state?.providers?.[n]||{};return p.enabled&&(String(p.api_key||'').trim()||n==='local_ollama');});
     return{rss,reddit,newsapi,gdelt,llm,any:rss||reddit||newsapi||gdelt};
   },[cfg,state?.providers]);
 
@@ -222,7 +222,7 @@ export default function App(){
               <StatusLight ok={srcStatus.reddit} label={`Reddit ${srcStatus.reddit?'✓':'✗'}`}/>
               <StatusLight ok={srcStatus.newsapi} label={`NewsAPI ${srcStatus.newsapi?'✓':'—'}`}/></div>
             <div><div style={{fontSize:10,color:C.muted,marginBottom:3,fontWeight:600}}>KI</div>
-              {['openai','claude','gemini','ollama_cloud'].map(n=>{const p=state?.providers?.[n]||{};const ok=p.enabled&&String(p.api_key||'').trim();return<StatusLight key={n} ok={ok?true:null} label={`${n}${ok?' ✓':''}`}/>;})}</div>
+              {['openai','claude','gemini','ollama_cloud','local_ollama','kimi_direct'].map(n=>{const p=state?.providers?.[n]||{};const ok=p.enabled&&(String(p.api_key||'').trim()||n==='local_ollama');return<StatusLight key={n} ok={ok?true:null} label={`${n}${ok?' ✓':''}`}/>;})}</div>
           </div>
         </Card>
 
@@ -434,17 +434,34 @@ export default function App(){
       {/* TAB: RISK                                  */}
       {/* ═══════════════════════════════════════════ */}
       {tab==='risk'&&<div>
-        <Card title="Risk Gauges" help="Zeigt wie nah du an den Limits bist. Grün = sicher. Gelb = Vorsicht (der gelbe Strich ist die Warnschwelle). Rot = Limit erreicht.">
-          <Gauge label="Drawdown (max. Verlust vom Höchststand)" value={Number(state?.risk?.drawdown_pct||0)} max={0.08} warning={0.05} help="Ab 5% → kleinere Positionen. Ab 8% → Bot stoppt."/>
-          <Gauge label="Exposure (Geld im Risiko)" value={bankroll>0?openExposure/bankroll:0} max={Number(cfg.max_total_exposure_pct||0.5)} warning={Number(cfg.max_total_exposure_pct||0.5)*0.7} help="Anteil des Bankrolls in offenen Trades."/>
+        {/* Risk Level Banner */}
+        {riskStatus?.summary?.risk_level&&riskStatus.summary.risk_level!=='OK'&&<div style={{padding:'8px 12px',marginBottom:12,borderRadius:8,background:riskStatus.summary.risk_level==='CRITICAL'?'rgba(239,68,68,0.1)':'rgba(245,158,11,0.1)',border:`1px solid ${riskStatus.summary.risk_level==='CRITICAL'?C.red:C.amber}44`}}>
+          <div style={{fontSize:13,fontWeight:600,color:riskStatus.summary.risk_level==='CRITICAL'?C.red:C.amber}}>{riskStatus.summary.risk_level==='CRITICAL'?'🚨 KRITISCH — Drawdown Limit erreicht! Alle neuen Trades blockiert.':'⚠️ WARNUNG — Drawdown über 5%. Positionen werden auf ⅛ Kelly reduziert.'}</div>
+        </div>}
+
+        <Card title="Risk Gauges" help="Grün = sicher. Gelb = Vorsicht. Rot = Limit erreicht.">
+          <Gauge label="Drawdown (max. Verlust vom Höchststand)" value={Number(state?.risk?.drawdown_pct||0)} max={Number(cfg.max_drawdown_pct||0.08)} warning={0.05}/>
+          <Gauge label="Exposure (Geld im Risiko)" value={bankroll>0?openExposure/bankroll:0} max={Number(cfg.max_total_exposure_pct||0.5)} warning={Number(cfg.max_total_exposure_pct||0.5)*0.7}/>
           <Gauge label="Positionen" value={openTrades.length/Math.max(1,Number(cfg.max_concurrent_positions||15))} max={1} warning={0.8}/>
+          <Gauge label="Tagesverlust" value={bankroll>0?Math.abs(Math.min(0,Number(state?.risk?.daily_realized_pnl||0)))/bankroll:0} max={Number(cfg.daily_loss_limit_pct||0.15)} warning={0.1}/>
         </Card>
+
         <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:14}}>
-          <Metric label="Kelly" value={`${fmt(Number(cfg.kelly_fraction||0.25)*100,0)}%`} help="Wie aggressiv gewettet wird. 25% = Quarter Kelly (sicher)."/>
-          <Metric label="Max Pos" value={`${fmt(Number(cfg.max_pos_pct||0.05)*100,0)}%`} help="Max. Anteil pro Trade."/>
-          <Metric label="Violations" value={riskStatus?.summary?.violations||0} good={!Number(riskStatus?.summary?.violations||0)} help="Anzahl Trades die ein Limit verletzen."/>
-          <Metric label="Exposure" value={`$${fmt(openExposure,0)}`} good={bankroll>0?openExposure/bankroll<0.5:true}/>
+          <Metric label="Equity" value={`$${fmt(riskStatus?.summary?.current_equity||bankroll+totalPnl,0)}`} good={totalPnl>=0} help="Aktuelles Kapital (Bankroll + P&L)"/>
+          <Metric label="Peak" value={`$${fmt(riskStatus?.summary?.peak_bankroll||bankroll,0)}`} help="Höchster Stand des Bankrolls"/>
+          <Metric label="Violations" value={riskStatus?.summary?.violations||0} good={!Number(riskStatus?.summary?.violations||0)}/>
+          <Metric label="Sharpe" value={fmt(compoundStatus?.summary?.sharpe_ratio,2)} target="≥2.0" good={Number(compoundStatus?.summary?.sharpe_ratio||0)>=2} help="Risk-adjusted Return. Über 2.0 ist sehr gut."/>
+          <Metric label="Risk Level" value={riskStatus?.summary?.risk_level||'—'} good={riskStatus?.summary?.risk_level==='OK'}/>
         </div>
+
+        {/* Detailed Risk Checks */}
+        {(riskStatus?.summary?.checks||[]).length>0&&<Card title="Risk Checks" help="Jeder Check muss bestanden sein damit neue Trades erlaubt sind.">
+          {(riskStatus.summary.checks||[]).map((c,i)=><div key={i} style={{display:'flex',alignItems:'flex-start',gap:5,padding:'3px 0',fontSize:11}}>
+            <span style={{color:c.ok?C.green:C.red,fontSize:12}}>{c.ok?'✅':'❌'}</span>
+            <span style={{color:c.ok?C.text:C.amber}}>{c.desc}</span>
+          </div>)}
+        </Card>}
+
         {openTrades.length>0&&<Card title={`Offene Positionen (${openTrades.length})`} help="Alle aktuell laufenden Trades.">
           {openTrades.map((t,i)=><div key={i} style={{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:`1px solid ${C.border}11`,fontSize:11,...mono}}>
             <span style={{color:C.text}}>{(t.title||t.market_id||'').slice(0,45)}</span>
@@ -500,6 +517,7 @@ export default function App(){
               {key:'scanner_active_to_utc',label:'Aktiv bis (UTC Stunde)',rec:24,desc:'Scanner nur bis zu dieser Stunde aktiv.',why:'24 = rund um die Uhr.'},
               {key:'scanner_history_retention_days',label:'History Tage',rec:14,desc:'Wie lange Preishistorie gespeichert wird.',why:'14 Tage für 7-Tage-Schnitt.'},
               {key:'scanner_ws_enabled',label:'WebSocket aktiv',rec:false,desc:'Live-Orderbook Updates über WebSocket.',why:'Optional, nur für fortgeschrittene Setups.',type:'bool'},
+              {key:'scanner_market_categories',label:'Markt-Kategorien',rec:'',desc:'Nur bestimmte Themen scannen (komma-getrennt). Z.B.: finance, crypto, politics, sports, weather. Leer = alle.',why:'Wenn du dich mit Aktien/Finance auskennst, setze auf "finance,crypto" für deinen Vorteil.',type:'text'},
             ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
           </Card>
           {/* Research */}
@@ -536,16 +554,18 @@ export default function App(){
             {[{key:'llm_weight_openai',label:'OpenAI Gewicht',rec:0.35,desc:'Anteil von OpenAI im Ensemble.',why:'0.35 = 35%. Alle Gewichte zusammen müssen nicht genau 1.0 ergeben.'},
               {key:'llm_weight_claude',label:'Claude Gewicht',rec:0.25,desc:'Anteil von Claude.',why:'0.25 = 25%.'},
               {key:'llm_weight_gemini',label:'Gemini Gewicht',rec:0.2,desc:'Anteil von Gemini.',why:'0.20 = 20%.'},
-              {key:'llm_weight_ollama_cloud',label:'Ollama Gewicht',rec:0.2,desc:'Anteil von Ollama Cloud.',why:'0.20 = 20%.'},
+              {key:'llm_weight_ollama_cloud',label:'Ollama Cloud Gewicht',rec:0.2,desc:'Anteil von Ollama Cloud.',why:'0.20 = 20%.'},
+              {key:'llm_weight_local_ollama',label:'Lokales Ollama Gewicht',rec:0.15,desc:'Anteil des lokalen Ollama.',why:'0.15 = 15%. Nur relevant wenn Ollama auf dem VPS läuft.'},
+              {key:'llm_weight_kimi',label:'Kimi Gewicht',rec:0.15,desc:'Anteil von Kimi/Moonshot.',why:'0.15 = 15%.'},
             ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
             <div style={{fontSize:12,fontWeight:600,marginTop:8,marginBottom:6}}>Provider</div>
-            {['openai','claude','gemini','ollama_cloud'].map(name=>{const p=state?.providers?.[name]||{};return<div key={name} style={{marginBottom:6,padding:'6px 8px',background:C.bg,borderRadius:5,border:`1px solid ${C.border}`}}>
+            {['openai','claude','gemini','ollama_cloud','local_ollama','kimi_direct'].map(name=>{const p=state?.providers?.[name]||{};return<div key={name} style={{marginBottom:6,padding:'6px 8px',background:C.bg,borderRadius:5,border:`1px solid ${C.border}`}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:2}}>
                 <span style={{fontSize:12,fontWeight:600,color:p.enabled?C.cyan:C.muted}}>{name}</span>
                 <label style={{display:'flex',alignItems:'center',gap:4}}><input type="checkbox" checked={!!p.enabled} onChange={e=>setProvider(name,'enabled',e.target.checked)}/><span style={{fontSize:10,color:C.muted}}>aktiv</span></label>
               </div>
               <div style={{fontSize:10,color:C.dim,marginBottom:3}}>
-                {name==='openai'&&'OpenAI (GPT-4o-mini). Gewicht: 35%.'}{name==='claude'&&'Anthropic Claude. Gewicht: 25%.'}{name==='gemini'&&'Google Gemini. Kostenloser Tier! Gewicht: 20%.'}{name==='ollama_cloud'&&'Ollama Cloud. Gewicht: 20%.'}
+                {name==='openai'&&'OpenAI (GPT-4o-mini). Gewicht: 35%.'}{name==='claude'&&'Anthropic Claude. Gewicht: 25%.'}{name==='gemini'&&'Google Gemini. Kostenloser Tier! Gewicht: 20%.'}{name==='ollama_cloud'&&'Ollama Cloud. Gewicht: 20%.'}{name==='local_ollama'&&'Lokales Ollama auf deinem VPS. KOSTENLOS, braucht keinen API-Key! Model z.B. qwen2.5:14b.'}{name==='kimi_direct'&&'Kimi/Moonshot API. Braucht API-Key von moonshot.ai.'}
               </div>
               {p.enabled&&<><input placeholder="API Key" type="password" value={p.api_key||''} onChange={e=>setProvider(name,'api_key',e.target.value)} style={{display:'block',width:'100%',padding:'4px 7px',borderRadius:4,border:`1px solid ${C.border}`,background:C.card,color:C.text,fontSize:11,...mono,marginBottom:2,boxSizing:'border-box'}}/>
               <input placeholder="Model" value={p.model||''} onChange={e=>setProvider(name,'model',e.target.value)} style={{display:'block',width:'100%',padding:'4px 7px',borderRadius:4,border:`1px solid ${C.border}`,background:C.card,color:C.text,fontSize:11,...mono,marginBottom:2,boxSizing:'border-box'}}/>

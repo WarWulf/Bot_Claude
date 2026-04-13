@@ -55,8 +55,27 @@ export function scanAndRankMarkets(markets, cfg) {
   // Load past failures to avoid repeating mistakes
   const failurePatterns = loadFailurePatterns();
 
+  // Category filter — let user focus on finance, politics etc.
+  const categoryFilter = String(cfg.scanner_market_categories || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+  const CATEGORY_KEYWORDS = {
+    finance: ['stock','s&p','nasdaq','dow','treasury','fed','interest rate','gdp','inflation','earnings','ipo','market cap','bitcoin','btc','eth','crypto','forex'],
+    crypto: ['bitcoin','btc','eth','ethereum','crypto','solana','sol','defi','nft','blockchain','binance','coinbase'],
+    politics: ['election','president','congress','senate','governor','vote','ballot','democrat','republican','trump','biden','legislation','bill','law','supreme court'],
+    sports: ['nfl','nba','mlb','nhl','fifa','world cup','super bowl','championship','playoff','soccer','football','basketball','baseball','tennis','f1','ufc'],
+    weather: ['temperature','rain','snow','hurricane','tornado','weather','climate','heat','cold','storm'],
+  };
+
   return markets
     .filter((m) => ['open', 'active', ''].includes(String(m.status || '').toLowerCase()))
+    // Category filter
+    .filter((m) => {
+      if (!categoryFilter.length) return true;
+      const q = String(m.question || m.market || '').toLowerCase();
+      return categoryFilter.some(cat => {
+        const keywords = CATEGORY_KEYWORDS[cat] || [cat];
+        return keywords.some(kw => q.includes(kw));
+      });
+    })
     // Skip markets that match past failures
     .filter((m) => {
       const q = String(m.question || m.market || '').toLowerCase();

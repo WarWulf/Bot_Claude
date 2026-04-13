@@ -8,7 +8,8 @@ export async function queryLlmProvider(providerName, providerCfg, globalCfg, pro
   const apiKey = String(providerCfg.api_key || '').trim();
   const baseUrl = String(providerCfg.base_url || '').trim();
   const model = String(providerCfg.model || '').trim();
-  if (!apiKey || !baseUrl || !model) return null;
+  const isLocalOllama = providerName === 'local_ollama';
+  if ((!apiKey && !isLocalOllama) || !baseUrl || !model) return null;
   const timeoutMs = Number(globalCfg.llm_timeout_ms || 12000);
   const maxTokens = Number(globalCfg.llm_max_tokens || 220);
   const temperature = Number(globalCfg.llm_temperature ?? 0.1);
@@ -25,7 +26,7 @@ export async function queryLlmProvider(providerName, providerCfg, globalCfg, pro
   // OpenAI-compatible (openai, claude, ollama_cloud, kimi_direct, local_ollama)
   const headers = { 'Content-Type': 'application/json' };
   if (providerName === 'claude') { headers['x-api-key'] = apiKey; headers['anthropic-version'] = '2023-06-01'; }
-  else headers['Authorization'] = `Bearer ${apiKey}`;
+  else if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
   const body = providerName === 'claude'
     ? { model, max_tokens: maxTokens, temperature, messages: [{ role: 'user', content: prompt }] }
@@ -45,8 +46,8 @@ export async function queryLlmProvider(providerName, providerCfg, globalCfg, pro
 export async function buildLlmEnsembleEstimate(market, brief = {}, cfg = {}, providers = {}) {
   if (cfg.llm_enabled === false) return { estimates: {}, notes: ['llm_disabled'] };
   const prompt = ['Return strict JSON only with keys: probability_yes (0..1), confidence (0..1), rationale (short string).', `Market: ${market.question}`, `Market price YES: ${Number(market.market_price || 0.5).toFixed(4)}`, `Research sentiment: ${brief.sentiment || 'neutral'}`, `Research confidence: ${Number(brief.confidence || 0.4).toFixed(3)}`, `Narrative gap: ${Number(brief.consensus_vs_market_gap || 0).toFixed(3)}`].join('\n');
-  const providerOrder = ['openai', 'claude', 'gemini', 'ollama_cloud'];
-  const rawWeights = { openai: Number(cfg.llm_weight_openai ?? 0.35), claude: Number(cfg.llm_weight_claude ?? 0.25), gemini: Number(cfg.llm_weight_gemini ?? 0.2), ollama_cloud: Number(cfg.llm_weight_ollama_cloud ?? 0.2) };
+  const providerOrder = ['openai', 'claude', 'gemini', 'ollama_cloud', 'local_ollama', 'kimi_direct'];
+  const rawWeights = { openai: Number(cfg.llm_weight_openai ?? 0.35), claude: Number(cfg.llm_weight_claude ?? 0.25), gemini: Number(cfg.llm_weight_gemini ?? 0.2), ollama_cloud: Number(cfg.llm_weight_ollama_cloud ?? 0.2), local_ollama: Number(cfg.llm_weight_local_ollama ?? 0.15), kimi_direct: Number(cfg.llm_weight_kimi ?? 0.15) };
   const estimates = {};
   const confidences = {};
   const notes = [];

@@ -385,28 +385,41 @@ async function runCompoundStep() {
   };
 
   // Write losses to failure_log.md
-  const recentLosses = closedTrades.filter(t => Number(t.netPnlUsd || 0) < 0).slice(0, 5);
+  const recentLosses = closedTrades.filter(t => Number(t.netPnlUsd || 0) < 0).slice(0, 10);
   if (recentLosses.length) {
     try {
       const logDir = resolvePath(process.cwd(), 'predict-market-bot', 'references');
       mkdirSync(logDir, { recursive: true });
       const logPath = resolvePath(logDir, 'failure_log.md');
-      const entries = recentLosses.map(t => {
-        const date = (t.time || new Date().toISOString()).slice(0, 10);
-        return `### ${date} — ${(t.title || t.market_id || 'unknown').slice(0, 60)}\n- **Result:** Loss of $${Math.abs(Number(t.netPnlUsd || 0)).toFixed(2)}\n- **Direction:** ${t.direction || '?'}\n- **Root cause:** needs classification\n- **Lesson:** auto-logged by compound step\n`;
-      }).join('\n');
-      // Only append if not already logged
       const existing = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
-      const newEntries = recentLosses.filter(t => !existing.includes(t.market_id || 'xxx'));
+      const newEntries = recentLosses.filter(t => !existing.includes(String(t.market_id || 'xxx')));
       if (newEntries.length) {
         const newText = newEntries.map(t => {
           const date = (t.time || new Date().toISOString()).slice(0, 10);
-          return `\n### ${date} — ${(t.title || t.market_id || 'unknown').slice(0, 60)}\n- **Result:** Loss of $${Math.abs(Number(t.netPnlUsd || 0)).toFixed(2)}\n- **Direction:** ${t.direction || '?'}\n- **Root cause:** needs classification\n- **Lesson:** auto-logged\n`;
+          const loss = Math.abs(Number(t.netPnlUsd || 0));
+          const edge = Number(t.edge || 0);
+          const conf = Number(t.confidence || 0);
+          // Auto-classify the failure
+          let rootCause = 'unknown';
+          let lesson = '';
+          if (Math.abs(edge) < 0.03) { rootCause = 'low_edge'; lesson = 'Edge war zu klein (<3%). Min Edge erhöhen oder Signal ignorieren.'; }
+          else if (conf < 0.5) { rootCause = 'low_confidence'; lesson = 'Confidence war zu niedrig (<50%). Mehr Research-Quellen nötig.'; }
+          else if (loss > Number(state.config?.bankroll||1000) * 0.04) { rootCause = 'oversized_position'; lesson = 'Position war zu groß. Kelly Fraction senken.'; }
+          else { rootCause = 'bad_prediction'; lesson = 'Vorhersage war falsch trotz hoher Confidence. Prüfe ob die Nachrichtenquellen zuverlässig waren.'; }
+          return `\n### ${date} — ${(t.title || t.market_id || 'unknown').slice(0, 60)}\n- **Result:** Loss $${loss.toFixed(2)}\n- **Direction:** ${t.direction || '?'} | Edge: ${(edge*100).toFixed(1)}% | Conf: ${(conf*100).toFixed(0)}%\n- **Root cause:** ${rootCause}\n- **Lesson:** ${lesson}\n`;
         }).join('');
         appendFileSync(logPath, newText, 'utf8');
-        logLine(state, 'info', `compound: ${newEntries.length} losses logged to failure_log.md`);
+        logLine(state, 'info', `compound: ${newEntries.length} losses logged to failure_log.md (auto-classified)`);
       }
     } catch (e) { logLine(state, 'warning', `compound: failed to write failure_log: ${e.message}`); }
+  }
+
+  // Calculate Sharpe Ratio (annualized, simplified)
+  if (closedTrades.length >= 5) {
+    const returns = closedTrades.map(t => Number(t.netPnlUsd || 0) / Math.max(1, Number(t.positionUsd || 1)));
+    const avgReturn = returns.reduce((s, r) => s + r, 0) / returns.length;
+    const stdReturn = Math.sqrt(returns.reduce((s, r) => s + (r - avgReturn) ** 2, 0) / returns.length);
+    state.compound_summary.sharpe_ratio = stdReturn > 0 ? Number((avgReturn / stdReturn * Math.sqrt(252)).toFixed(3)) : 0;
   }
 
   // Recalculate Brier Score
