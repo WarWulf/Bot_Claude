@@ -219,18 +219,33 @@ export default function App(){
             const daysOpen=Math.floor(hoursOpen/24);
             const openStr=`${openedAt.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})} ${openedAt.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})}`;
             const durationStr=daysOpen>0?`${daysOpen}T ${hoursOpen%24}h`:`${hoursOpen}h`;
+            // Calculate remaining time from end_date or days_to_expiry
+            let remainStr='';
+            if(t.end_date){
+              const endMs=new Date(t.end_date).getTime();
+              if(endMs>Date.now()){
+                const remainDays=Math.ceil((endMs-Date.now())/86400000);
+                const remainHours=Math.ceil((endMs-Date.now())/3600000)%24;
+                remainStr=remainDays>0?`${remainDays}T ${remainHours}h`:`${remainHours}h`;
+              }else{remainStr='abgelaufen';}
+            }else if(Number(t.days_to_expiry)>0){
+              const approxRemain=Math.max(0,Number(t.days_to_expiry)-daysOpen);
+              remainStr=approxRemain>0?`~${approxRemain}T`:'bald';
+            }
+            const endDateStr=t.end_date?new Date(t.end_date).toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'2-digit'}):'';
             return<div key={i} style={{padding:'7px 0',borderBottom:`1px solid ${C.border}11`}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
                 <span style={{fontSize:12,flex:1}}>{(t.title||t.market_id||'').slice(0,55)}</span>
                 <span style={{fontSize:11,...mono,fontWeight:600,color:t.direction==='BUY_YES'?C.green:C.red}}>{t.direction}</span>
               </div>
               <div style={{display:'flex',gap:10,fontSize:10,...mono,color:C.muted,marginTop:3,flexWrap:'wrap'}}>
-                <span title="Eröffnet am">📅 Geöffnet: {openStr}</span>
-                <span title="Wie lange schon offen">⏱ Läuft seit: {durationStr}</span>
-                {Number(t.days_to_expiry||0)>0&&<span title="Restlaufzeit des Marktes">🏁 Markt endet in: {t.days_to_expiry}T</span>}
+                <span title="Eröffnet am">📅 {openStr}</span>
+                <span title="Wie lange schon offen">⏱ seit {durationStr}</span>
+                {remainStr&&<span title={`Markt endet: ${endDateStr}`} style={{color:remainStr==='abgelaufen'?C.red:Number(remainStr.replace(/\D/g,''))<=3?C.amber:C.muted}}>🏁 noch {remainStr}{endDateStr?` (${endDateStr})`:''}</span>}
                 <span title="Einsatz">💰 ${fmt(t.positionUsd,0)}</span>
-                <span title="Edge bei Eröffnung">Edge: {fmt(Number(t.edge||0)*100,1)}%</span>
-                <span title="Plattform" style={{fontSize:9,padding:'1px 4px',borderRadius:3,background:t.platform==='kalshi'?`${C.purple}20`:`${C.cyan}20`,color:t.platform==='kalshi'?C.purple:C.cyan}}>{t.platform||t.source}</span>
+                <span title="Edge bei Eröffnung" style={{color:Number(t.edge||0)>0.05?C.green:C.muted}}>Edge:{fmt(Number(t.edge||0)*100,1)}%</span>
+                {t.category&&t.category!=='other'&&<span style={{fontSize:9,padding:'1px 4px',borderRadius:3,background:`${C.amber}15`,color:C.amber}}>{t.category}</span>}
+                <span style={{fontSize:9,padding:'1px 4px',borderRadius:3,background:t.platform==='kalshi'?`${C.purple}20`:`${C.cyan}20`,color:t.platform==='kalshi'?C.purple:C.cyan}}>{t.platform||t.source}</span>
               </div>
             </div>;})}
         </Card>}

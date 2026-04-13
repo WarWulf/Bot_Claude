@@ -74,6 +74,19 @@ export async function fetchPolymarketMarkets(limit = 100) {
       let price = Number(item.probability ?? item.lastTradePrice ?? item.price);
       if (price > 1 && price <= 100) price /= 100;
       if (!question || question.length < 6 || Number.isNaN(price) || price < 0 || price > 1) return null;
+      // Calculate days to expiry from end date
+      let daysToExpiry = Number(item.daysToExpiration || 0);
+      if (!daysToExpiry) {
+        const endStr = item.end_date_iso || item.endDate || item.close_time || item.resolution_date || '';
+        if (endStr) {
+          const endMs = new Date(endStr).getTime();
+          if (endMs > Date.now()) daysToExpiry = Math.ceil((endMs - Date.now()) / 86400000);
+        }
+      }
+      if (!daysToExpiry) daysToExpiry = 30; // fallback
+      // Get tags/category from API if available
+      const tags = Array.isArray(item.tags) ? item.tags.map(t => String(t).toLowerCase()).join(' ') : '';
+      const groupSlug = String(item.groupSlug || item.group_slug || '').toLowerCase();
       return {
         platform: 'polymarket',
         question,
@@ -88,8 +101,9 @@ export async function fetchPolymarketMarkets(limit = 100) {
         volume: Number(item.volume || 0),
         volume_7d_avg: Number(item.volumeNum || item.volume || 0),
         liquidity: Number(item.liquidity || 0),
-        days_to_expiry: Number(item.daysToExpiration || item.days_to_expiry || 7),
-        category: detectCategory(question),
+        days_to_expiry: daysToExpiry,
+        category: detectCategory(question + ' ' + tags + ' ' + groupSlug),
+        end_date: item.end_date_iso || item.endDate || item.close_time || '',
       };
     })
     .filter(Boolean)
@@ -99,37 +113,45 @@ export async function fetchPolymarketMarkets(limit = 100) {
 export async function fetchKalshiMarkets(limit = 100) {
   const headers = buildKalshiAuthHeaders('/trade-api/v2/markets');
   const cfg = loadState().config || {};
-  // Try the main Kalshi API first, fallback to elections
-  let data;
-  try {
-    const resp = await fetchWithRetry(
-      'https://trading-api.kalshi.com/trade-api/v2/markets?limit=200&status=open',
-      { headers },
-      { label: 'kalshi', retries: cfg.scanner_http_retries, timeoutMs: cfg.scanner_http_timeout_ms }
-    );
-    data = await resp.json();
-  } catch {
+  // Try multiple Kalshi endpoints for maximum market coverage
+  const endpoints = [
+    'https://trading-api.kalshi.com/trade-api/v2/markets?limit=200&status=open',
+    'https://api.elections.kalshi.com/trade-api/v2/markets?limit=200&status=open',
+    'https://demo-api.kalshi.co/trade-api/v2/markets?limit=200&status=open',
+  ];
+  let allItems = [];
+  for (const url of endpoints) {
     try {
-      const resp = await fetchWithRetry(
-        'https://api.elections.kalshi.com/trade-api/v2/markets?limit=200&status=open',
-        { headers },
-        { label: 'kalshi-elections', retries: 1, timeoutMs: cfg.scanner_http_timeout_ms }
-      );
-      data = await resp.json();
-    } catch { data = { markets: [] }; }
+      const resp = await fetchWithRetry(url, { headers }, { label: 'kalshi', retries: 1, timeoutMs: Number(cfg.scanner_http_timeout_ms || 8000) });
+      const data = await resp.json();
+      const items = data?.markets || [];
+      if (items.length) { allItems = items; break; } // Use first endpoint that works
+    } catch { continue; }
   }
-  const items = data?.markets || [];
 
-  return items.slice(0, limit).map((item) => {
+  const seenTickers = new Set();
+  return allItems.slice(0, limit).map((item) => {
+    const ticker = String(item.ticker || '');
+    if (seenTickers.has(ticker)) return null;
+    seenTickers.add(ticker);
     const yesBid = Number(item.yes_bid);
     const yesAsk = Number(item.yes_ask);
     const lastPrice = Number(item.last_price);
     let price = 0.5;
     if (!Number.isNaN(yesBid) && !Number.isNaN(yesAsk)) price = (yesBid + yesAsk) / 200;
     else if (!Number.isNaN(lastPrice)) price = lastPrice / 100;
+    // Calculate days to expiry from close_time or expiration_time
+    let daysToExpiry = 0;
+    const closeStr = item.close_time || item.expiration_time || item.expected_expiration_time || '';
+    if (closeStr) {
+      const closeMs = new Date(closeStr).getTime();
+      if (closeMs > Date.now()) daysToExpiry = Math.ceil((closeMs - Date.now()) / 86400000);
+    }
+    if (!daysToExpiry) daysToExpiry = 30;
+    const question = String(item.title || item.subtitle || item.ticker || 'Kalshi Market');
     return {
       platform: 'kalshi',
-      question: String(item.title || item.subtitle || item.ticker || 'Kalshi Market'),
+      question,
       market: String(item.ticker || item.title || 'kalshi').slice(0, 180),
       outcome: 'YES',
       market_price: Number(price.toFixed(4)),
@@ -141,10 +163,11 @@ export async function fetchKalshiMarkets(limit = 100) {
       volume: Number(item.volume || 0),
       volume_7d_avg: Number(item.volume_7d || item.volume || 0),
       liquidity: Number(item.open_interest || 0),
-      days_to_expiry: Number(item.days_to_expiry || 7),
-      category: detectCategory(String(item.title || item.subtitle || '')),
+      days_to_expiry: daysToExpiry,
+      category: detectCategory(question + ' ' + String(item.category || '')),
+      end_date: closeStr,
     };
-  });
+  }).filter(Boolean);
 }
 
 export async function runPolymarketConnectionTest(cfg = {}) {

@@ -60,6 +60,7 @@ export async function runExecutionStep(state = loadState()) {
         model_prob: Number(p.model_prob || 0),
         market_prob: Number(p.market_prob || 0),
         days_to_expiry: Number(marketData.days_to_expiry || 0),
+        end_date: marketData.end_date || '',
         platform: marketData.platform || p.platform || 'unknown',
         category: marketData.category || '',
       });
