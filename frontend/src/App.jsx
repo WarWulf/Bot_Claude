@@ -264,23 +264,45 @@ export default function App(){
             </div>;})}
         </Card>
 
-        {/* Self-Test Detail */}
-        {scanResult?.self_test&&<Card title={`Self-Test: ${scanResult.self_test.ok?'✅ Bestanden':`⚠️ ${scanResult.self_test.passed}/${scanResult.self_test.total}`}`}
-          help="Jeder Check prüft ob der Scanner korrekt funktioniert. Alle müssen grün sein für 100%.">
-          {(scanResult.self_test.checks||[]).map((c,i)=><div key={i} style={{display:'flex',alignItems:'flex-start',gap:6,padding:'3px 0',fontSize:11}}>
-            <span style={{color:c.ok?C.green:C.red,fontSize:13,lineHeight:1}}>{c.ok?'✅':'❌'}</span>
-            <div><span style={{color:c.ok?C.text:C.amber,fontWeight:500}}>{c.key.replace(/_/g,' ')}</span>
-              {c.desc&&<div style={{color:C.muted,fontSize:10}}>{c.desc}</div>}
-              {!c.ok&&<div style={{color:C.red,fontSize:10,...mono}}>→ {
-                c.key==='recent_scan_fresh'?'Starte einen neuen Scan.':
-                c.key==='tradeable_target_reached'?'Senke scanner_min_volume und scanner_min_liquidity in den Einstellungen (z.B. auf 200).':
-                c.key==='auth_configured_any'?'Trage API-Keys ein ODER starte einen Scan (Polymarket braucht keinen Key zum Lesen).':
-                c.key==='breaker_closed'?'Scanner hatte zu viele Fehler. Warte oder prüfe die Verbindung.':
-                'Prüfe die Einstellungen.'
-              }</div>}
-            </div>
-          </div>)}
-        </Card>}
+        {/* Self-Test — alle Steps */}
+        <Card title="🧪 Self-Test — alle Schritte" help="Jeder Schritt hat eigene Checks. Grün = bestanden. Rot = fehlt etwas. Die Beschreibung erklärt was los ist und was du tun kannst.">
+          {[{n:1,k:'step1',l:'Scan',emoji:'🔍'},{n:2,k:'step2',l:'Research',emoji:'📰'},{n:3,k:'step3',l:'Predict',emoji:'🎯'},{n:4,k:'step4',l:'Execute',emoji:'⚡'},{n:5,k:'step5',l:'Risk',emoji:'🛡️'}].map(({n,k,l,emoji})=>{
+            const checks=steps?.[k]?.checks||[];
+            const pct=Number(steps?.[k]?.progress_pct||0);
+            if(!checks.length)return null;
+            const passed=checks.filter(c=>c.ok).length;
+            return<div key={k} style={{marginBottom:10,padding:'8px 10px',background:C.bg,borderRadius:6,border:`1px solid ${pct>=100?C.green:pct>0?C.amber:C.border}33`}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
+                <span style={{fontSize:12,fontWeight:600}}>{emoji} Step {n}: {l}</span>
+                <span style={{fontSize:11,...mono,color:pct>=100?C.green:C.amber}}>{passed}/{checks.length} Checks — {fmt(pct,0)}%</span>
+              </div>
+              {checks.map((c,i)=><div key={i} style={{display:'flex',alignItems:'flex-start',gap:5,padding:'2px 0',fontSize:11}}>
+                <span style={{color:c.ok?C.green:C.red,fontSize:12,lineHeight:1,minWidth:16}}>{c.ok?'✅':'❌'}</span>
+                <div style={{flex:1}}>
+                  <span style={{color:c.ok?C.text:C.amber}}>{c.desc||c.key.replace(/_/g,' ')}</span>
+                  {!c.ok&&<div style={{color:C.red,fontSize:10,...mono,marginTop:1}}>→ {
+                    c.key==='recent_scan_fresh'||c.key==='scan_freshness'?'Starte einen neuen Scan.':
+                    c.key==='tradeable_target'||c.key==='tradeable_target_reached'?'Senke Min Volume + Min Liquidität (z.B. auf 200).':
+                    c.key==='auth_configured_any'?'Trage API-Keys ein oder starte einen Scan.':
+                    c.key==='breaker_closed'?'Warte auf Cooldown oder prüfe die Verbindung.':
+                    c.key==='research_runs_exist'||c.key==='briefs_present'?'Klicke "Research" nachdem der Scan Ergebnisse hat.':
+                    c.key==='source_diversity'?'Aktiviere mehr Quellen (RSS, Reddit) in den Einstellungen.':
+                    c.key==='predict_runs_exist'||c.key==='predictions_present'?'Klicke "Predict" nachdem Research Briefs da sind.':
+                    c.key==='actionable_exist'?'Kein Markt hat genug Edge. Min Edge senken oder mehr Märkte scannen.':
+                    c.key==='brier_tracking'?'Wird automatisch gefüllt wenn Märkte auslaufen.':
+                    c.key==='execution_runs_exist'?'Klicke "Execute" nachdem Predictions da sind.':
+                    c.key==='kelly_configured'?'Kelly Fraction in Einstellungen setzen (empf: 0.25).':
+                    c.key==='risk_runs_exist'?'Klicke "Risk" oder starte die Full Pipeline.':
+                    c.key==='risk_limits_set'?'Setze max_pos_pct und max_drawdown in den Einstellungen.':
+                    c.key==='drawdown_ok'?'Drawdown ist zu hoch! Neue Trades werden blockiert.':
+                    c.key==='compound_exists'?'Starte die Full Pipeline — Compound läuft am Ende automatisch.':
+                    'Prüfe die Einstellungen.'
+                  }</div>}
+                </div>
+              </div>)}
+            </div>;})}
+          {!steps&&<div style={{color:C.muted,fontSize:12}}>Lade Self-Test Daten...</div>}
+        </Card>
 
         {/* Quellen-Test */}
         <Card title="Quellen testen" help="Testet ob RSS, Reddit etc. wirklich Daten liefern — nicht nur ob sie eingeschaltet sind.">
