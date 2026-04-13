@@ -30,7 +30,7 @@ import { loadSkillProfiles } from './stepRegistry.js';
 import { liveCommLog } from './utils.js';
 import { computeBrierCalibration } from './utils.js';
 import { registerAuthRoutes } from './auth.js';
-import { buildPolymarketAuthHeaders, buildKalshiAuthHeaders, runPolymarketConnectionTest, runKalshiConnectionTest } from './platforms.js';
+import { buildPolymarketAuthHeaders, buildKalshiAuthHeaders, runPolymarketConnectionTest, runKalshiConnectionTest, fetchPolymarketMarkets, fetchKalshiMarkets } from './platforms.js';
 import { websocketState, flushWsTicksBuffer, applyWebsocketConfig, stopWebsocket } from './websockets.js';
 import { scannerRuntime, scanAudit, runScanCycle, onScanFailure, ensureScanScheduler, scanAndRankMarkets } from './scanner.js';
 import { runResearchStep } from './research.js';
@@ -68,6 +68,41 @@ app.get('/api/state', (_, res) => {
 
 // --- Scan ---
 app.get('/api/scan', (_, res) => { const s = loadState(); res.json({ scannedAt: s.scan_runs?.[0]?.time || null, markets: s.scan_results || [], runs: s.scan_runs || [] }); });
+
+// Diagnostic: test what APIs return raw
+app.get('/api/scan/diagnose', async (_, res) => {
+  const state = loadState();
+  const cfg = state.config || {};
+  const diag = { polymarket: { raw: 0, error: null }, kalshi: { raw: 0, error: null }, filters: {}, scanner: {} };
+  try {
+    const pmMarkets = await fetchPolymarketMarkets(200);
+    diag.polymarket.raw = pmMarkets.length;
+    diag.polymarket.sample = pmMarkets.slice(0, 3).map(m => ({ q: m.question?.slice(0, 60), price: m.market_price, vol: m.volume, liq: m.liquidity, days: m.days_to_expiry, cat: m.category }));
+  } catch (e) { diag.polymarket.error = String(e.message).slice(0, 100); }
+  try {
+    const kaMarkets = await fetchKalshiMarkets(200);
+    diag.kalshi.raw = kaMarkets.length;
+    diag.kalshi.sample = kaMarkets.slice(0, 3).map(m => ({ q: m.question?.slice(0, 60), price: m.market_price, vol: m.volume, liq: m.liquidity, days: m.days_to_expiry, cat: m.category }));
+  } catch (e) { diag.kalshi.error = String(e.message).slice(0, 100); }
+  // Show filter settings
+  diag.filters = { min_volume: cfg.scanner_min_volume, min_liquidity: cfg.scanner_min_liquidity, max_days: cfg.scanner_max_days, min_anomaly: cfg.scanner_min_anomaly_score, categories: cfg.scanner_market_categories || '(alle)', min_price: cfg.min_market_price, max_price: cfg.max_market_price };
+  // Try ranking
+  const allMarkets = [...(await fetchPolymarketMarkets(200).catch(() => [])), ...(await fetchKalshiMarkets(200).catch(() => []))];
+  const ranked = scanAndRankMarkets(allMarkets, cfg);
+  diag.scanner = { total_fetched: allMarkets.length, after_ranking: ranked.length };
+  // Show what gets filtered out
+  if (ranked.length === 0 && allMarkets.length > 0) {
+    const reasons = [];
+    const sample = allMarkets[0];
+    if (Number(sample?.volume || 0) < Number(cfg.scanner_min_volume || 200)) reasons.push(`Volume ${sample?.volume} < min ${cfg.scanner_min_volume}`);
+    if (Number(sample?.liquidity || 0) < Number(cfg.scanner_min_liquidity || 200)) reasons.push(`Liquidity ${sample?.liquidity} < min ${cfg.scanner_min_liquidity}`);
+    if (cfg.scanner_market_categories) reasons.push(`Category filter: "${cfg.scanner_market_categories}" — might be filtering everything`);
+    diag.scanner.filter_reasons = reasons;
+    diag.scanner.first_market_raw = { q: sample?.question?.slice(0, 80), vol: sample?.volume, liq: sample?.liquidity, days: sample?.days_to_expiry, cat: sample?.category };
+  }
+  res.json(diag);
+});
+
 app.post('/api/scan/run', async (_, res) => {
   try { const { ranked, added, source, state } = await runScanCycle({ force: true }); const selfTest = runStep1SelfTest(state); res.json({ ok: true, source, added, tradeable_count: ranked.length, top: ranked.slice(0, 20), scanner_health: buildScannerHealth(state.markets || [], state.config || {}), self_test: selfTest, step_status: computeStepStatus(state) }); }
   catch (e) { const s = loadState(); onScanFailure(e, s.config || {}); scanAudit(s, 'scan_failed_manual', { error: e.message }); saveState(s); res.status(500).json({ ok: false, message: e.message }); }
