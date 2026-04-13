@@ -5,7 +5,7 @@ const C={bg:'#0a0e17',card:'#111827',border:'#1e293b',green:'#22c55e',red:'#ef44
 const fmt=(v,d=2)=>{const n=Number(v);return Number.isNaN(n)?'-':n.toFixed(d);};
 const mono={fontFamily:'JetBrains Mono,monospace'};
 
-const ERR_HELP={'aborted':'LLM-Provider zu langsam. Erhöhe LLM Timeout (z.B. 20000ms).','http 401':'API-Key ungültig.','http 429':'Zu viele Anfragen. Warte ein paar Minuten.','http 500':'Server-Fehler beim Provider.','ECONNREFUSED':'URL falsch oder Server nicht erreichbar.','fetch failed':'Netzwerk-Problem.','no_llm_provider':'Kein LLM konfiguriert.','llm_disabled':'LLM deaktiviert — Heuristik wird benutzt.'};
+const ERR_HELP={'aborted':'LLM-Provider zu langsam. Erhöhe LLM Timeout (z.B. 30000ms).','http 401':'API-Key ungültig.','http 429':'Rate Limit! Zu viele Anfragen. Erhöhe "Delay zwischen Märkten" (z.B. 5000ms) oder reduziere "Top N" auf 5.','http 500':'Server-Fehler beim Provider.','ECONNREFUSED':'URL falsch oder Server nicht erreichbar.','fetch failed':'Netzwerk-Problem.','no_llm_provider':'Kein LLM konfiguriert.','llm_disabled':'LLM deaktiviert — Heuristik wird benutzt.'};
 function helpErr(msg){const s=String(msg||'').toLowerCase();for(const[k,v]of Object.entries(ERR_HELP))if(s.includes(k.toLowerCase()))return v;return null;}
 function dirExplain(p){if(!p)return'';const e=Number(p.edge||0),m=Number(p.market_prob||0),mdl=Number(p.model_prob||0);
   if(p.direction==='BUY_YES')return`Bot: ${(mdl*100).toFixed(0)}% vs Markt: ${(m*100).toFixed(0)}% → Vorteil +${(e*100).toFixed(1)}%. Markt unterbewertet → YES kaufen.`;
@@ -562,7 +562,8 @@ export default function App(){
           <Card title="🤖 KI & Predict" help="Für bessere Predictions. Ohne KI nutzt der Bot Heuristiken. Gemini hat kostenlosen Tier!">
             {[{key:'llm_enabled',label:'LLM aktiv',rec:true,desc:'KI für Vorhersagen nutzen.',why:'Deutlich besser als ohne.',type:'bool'},
               {key:'llm_timeout_ms',label:'LLM Timeout (ms)',rec:25000,desc:'Max Wartezeit pro LLM-Request.',why:'25s ist Standard. Bei häufigen Timeouts auf 35000 erhöhen.'},
-              {key:'llm_retries',label:'LLM Retries bei Timeout',rec:2,desc:'Wie oft bei Timeout nochmal versuchen (mit doppelter Wartezeit).',why:'2 = bei Timeout wird nochmal mit 50s versucht.'},
+              {key:'llm_retries',label:'LLM Retries bei Timeout',rec:2,desc:'Wie oft bei Timeout nochmal versuchen.',why:'2 = bei Timeout wird nochmal mit doppelter Wartezeit versucht.'},
+              {key:'llm_delay_between_markets_ms',label:'Delay zwischen Märkten (ms)',rec:4000,desc:'Wartezeit zwischen LLM-Anfragen pro Markt. Verhindert Rate Limits.',why:'4000ms = max 15 Märkte/Min. Für Gemini Free Tier nötig. Mit bezahltem Tier auf 1000 senken.'},
               {key:'llm_temperature',label:'Temperature',rec:0.1,desc:'0=konsistent, 1=kreativ.',why:'0.1 für stabile Schätzungen.'},
               {key:'llm_max_tokens',label:'Max Tokens',rec:220,desc:'Max Antwortlänge der KI.',why:'220 reicht für JSON mit Wahrscheinlichkeit + Begründung.'},
               {key:'llm_require_provider',label:'LLM zwingend',rec:false,desc:'Fehler wenn keine KI antwortet (statt Heuristik-Fallback).',why:'AUS lassen — Fallback ist besser als gar kein Signal.',type:'bool'},

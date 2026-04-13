@@ -108,6 +108,8 @@ export async function buildLlmEnsembleEstimate(market, brief = {}, cfg = {}, pro
       if (!out) continue;
       estimates[name] = clamp01(out.probability_yes, Number(market.market_price || 0.5));
       confidences[name] = clamp01(out.confidence, 0.55);
+      // Small delay between providers to avoid rate limits
+      if (providerOrder.indexOf(name) < providerOrder.length - 1) await new Promise(r => setTimeout(r, 500));
     } catch (error) {
       notes.push(`${name}:${String(error?.message || 'failed').slice(0, 80)}`);
       pushLiveComm('llm_request_error', { provider: name, message: String(error?.message || 'failed').slice(0, 160) });
@@ -131,7 +133,12 @@ export async function runPredictStep(state = loadState()) {
   const briefsByMarket = new Map((state.research_briefs || []).map((b) => [String(b.market_id), b]));
   const top = (state.scan_results || []).slice(0, Number(cfg.top_n || 10));
 
-  const predictions = await Promise.all(top.map(async (m) => {
+  // Process markets SEQUENTIALLY with delay to avoid rate limits (Gemini free: 15/min)
+  const llmDelayMs = Number(cfg.llm_delay_between_markets_ms || 4000); // 4s default = max 15 markets/min
+  const predictions = [];
+  for (let idx = 0; idx < top.length; idx++) {
+    const m = top[idx];
+    if (idx > 0) await new Promise(r => setTimeout(r, llmDelayMs)); // Rate limit delay
     const brief = briefsByMarket.get(String(m.id)) || {};
     const marketProb = Number(m.market_price || 0.5);
     const briefConfidence = Number(brief.confidence || 0.4);
@@ -162,8 +169,8 @@ export async function runPredictStep(state = loadState()) {
     const confidence = Number(Math.max(0.05, Math.min(0.99, (1 - Math.min(0.5, stdDev)) * 0.55 + briefConfidence * 0.45)).toFixed(3));
     const actionable = Math.abs(edge) >= minEdge && confidence >= minConfidence;
     const direction = edge > 0 ? 'BUY_YES' : edge < 0 ? 'BUY_NO' : 'NO_TRADE';
-    return { time: new Date().toISOString(), market_id: m.id, question: m.question, source: m.platform || 'unknown', market_prob: marketProb, model_prob: Number(modelProb.toFixed(4)), edge, expected_value: expectedValue, mispricing_zscore: deltaZ, ensemble_std_dev: Number(stdDev.toFixed(4)), ensemble_estimates: Object.fromEntries(Object.entries(heuristicEstimates).map(([k, v]) => [k, Number(v.toFixed(4))])), llm_estimates: Object.fromEntries(Object.entries(llmEnsemble.estimates || {}).map(([k, v]) => [k, Number(v.toFixed(4))])), llm_providers_used: llmProvidersUsed, llm_notes: llmEnsemble.notes || [], confidence: Number(confidence.toFixed(3)), actionable, direction: actionable ? direction : 'NO_TRADE' };
-  }));
+    predictions.push({ time: new Date().toISOString(), market_id: m.id, question: m.question, source: m.platform || 'unknown', market_prob: marketProb, model_prob: Number(modelProb.toFixed(4)), edge, expected_value: expectedValue, mispricing_zscore: deltaZ, ensemble_std_dev: Number(stdDev.toFixed(4)), ensemble_estimates: Object.fromEntries(Object.entries(heuristicEstimates).map(([k, v]) => [k, Number(v.toFixed(4))])), llm_estimates: Object.fromEntries(Object.entries(llmEnsemble.estimates || {}).map(([k, v]) => [k, Number(v.toFixed(4))])), llm_providers_used: llmProvidersUsed, llm_notes: llmEnsemble.notes || [], confidence: Number(confidence.toFixed(3)), actionable, direction: actionable ? direction : 'NO_TRADE' });
+  }
 
   if (cfg.llm_enabled !== false && cfg.llm_require_provider === true && predictions.some((p) => !(p.llm_providers_used || []).length)) {
     throw new Error('llm_required_but_no_provider_response');
