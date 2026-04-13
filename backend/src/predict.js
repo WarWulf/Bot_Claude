@@ -3,6 +3,31 @@
 import { loadState, saveState } from './appState.js';
 import { fetchWithRetry, clamp01, extractFirstJsonObject, computeBrierCalibration, pushLiveComm } from './utils.js';
 
+// Track provider health
+const providerHealth = {};
+function markProviderResult(name, ok, ms = 0) {
+  if (!providerHealth[name]) providerHealth[name] = { ok: 0, fail: 0, totalMs: 0, lastError: null, lastOk: null };
+  if (ok) { providerHealth[name].ok += 1; providerHealth[name].totalMs += ms; providerHealth[name].lastOk = Date.now(); }
+  else { providerHealth[name].fail += 1; providerHealth[name].lastError = Date.now(); }
+}
+export function getProviderHealth() { return providerHealth; }
+
+// Quick connectivity test — sends a tiny prompt, expects any response
+export async function testLlmProvider(providerName, providerCfg, globalCfg) {
+  const testPrompt = 'Return JSON: {"status":"ok"}';
+  const start = Date.now();
+  try {
+    const result = await queryLlmProvider(providerName, providerCfg, globalCfg, testPrompt);
+    const ms = Date.now() - start;
+    markProviderResult(providerName, true, ms);
+    return { ok: true, provider: providerName, ms, response: result ? 'valid' : 'empty' };
+  } catch (e) {
+    const ms = Date.now() - start;
+    markProviderResult(providerName, false, ms);
+    return { ok: false, provider: providerName, ms, error: String(e.message || e).slice(0, 100) };
+  }
+}
+
 export async function queryLlmProvider(providerName, providerCfg, globalCfg, prompt) {
   if (!providerCfg?.enabled) return null;
   const apiKey = String(providerCfg.api_key || '').trim();
@@ -10,9 +35,34 @@ export async function queryLlmProvider(providerName, providerCfg, globalCfg, pro
   const model = String(providerCfg.model || '').trim();
   const isLocalOllama = providerName === 'local_ollama';
   if ((!apiKey && !isLocalOllama) || !baseUrl || !model) return null;
-  const timeoutMs = Number(globalCfg.llm_timeout_ms || 12000);
+  const timeoutMs = Number(globalCfg.llm_timeout_ms || 25000); // Default 25s statt 12s
   const maxTokens = Number(globalCfg.llm_max_tokens || 220);
   const temperature = Number(globalCfg.llm_temperature ?? 0.1);
+  const maxRetries = Number(globalCfg.llm_retries || 2); // Retry on timeout
+
+  // Retry wrapper for timeout errors
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const attemptTimeout = timeoutMs * attempt; // 25s, then 50s
+    try {
+      const start = Date.now();
+      const result = await _queryLlmOnce(providerName, providerCfg, globalCfg, prompt, attemptTimeout, maxTokens, temperature, apiKey, baseUrl, model);
+      markProviderResult(providerName, true, Date.now() - start);
+      return result;
+    } catch (e) {
+      lastError = e;
+      const isTimeout = String(e.message || '').includes('abort');
+      if (!isTimeout || attempt >= maxRetries) {
+        markProviderResult(providerName, false);
+        throw e;
+      }
+      pushLiveComm('llm_retry', { provider: providerName, attempt, maxRetries, reason: 'timeout' });
+    }
+  }
+  throw lastError;
+}
+
+async function _queryLlmOnce(providerName, providerCfg, globalCfg, prompt, timeoutMs, maxTokens, temperature, apiKey, baseUrl, model) {
 
   if (providerName === 'gemini') {
     const resp = await fetchWithRetry(`${baseUrl}/models/${model}:generateContent?key=${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: maxTokens, temperature } }) }, { label: 'llm_gemini', retries: 1, timeoutMs });

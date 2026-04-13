@@ -64,6 +64,7 @@ export default function App(){
   const [saving,setSaving]=useState(false);
   const [scanResult,setScanResult]=useState(null);
   const [sourceTest,setSourceTest]=useState(null);
+  const [llmTest,setLlmTest]=useState(null);
 
   const apiFetch=useCallback(async(path,opts={})=>{const h={...(opts.headers||{})};if(uiPw)h['x-ui-password']=uiPw;return fetch(path,{...opts,headers:h});},[uiPw]);
   const apiJson=useCallback(async(path,fb=null)=>{try{const r=await apiFetch(path);if(!r.ok)throw 0;return await r.json();}catch{return fb;}},[apiFetch]);
@@ -305,11 +306,29 @@ export default function App(){
         </Card>
 
         {/* Quellen-Test */}
-        <Card title="Quellen testen" help="Testet ob RSS, Reddit etc. wirklich Daten liefern — nicht nur ob sie eingeschaltet sind.">
-          <div style={{display:'flex',gap:6,marginBottom:8}}>
-            <Btn onClick={()=>act('srcTest',async()=>{const r=await apiFetch('/api/sources/test');const p=await r.json();setSourceTest(p);setMsg(p.ok?'✅ Mindestens eine Quelle liefert Daten':'❌ Keine Quelle liefert Daten');})} busy={busy.srcTest}>🔌 Quellen jetzt testen</Btn>
+        <Card title="Verbindungen testen" help="Testet ob Nachrichtenquellen, Börsen und LLM-Provider wirklich erreichbar sind und Daten liefern.">
+          <div style={{display:'flex',flexWrap:'wrap',gap:6,marginBottom:8}}>
+            <Btn onClick={()=>act('srcTest',async()=>{const r=await apiFetch('/api/sources/test');const p=await r.json();setSourceTest(p);setMsg(p.ok?'✅ Quellen liefern Daten':'❌ Keine Quelle liefert Daten');})} busy={busy.srcTest}>📰 Quellen testen</Btn>
             <Btn onClick={()=>act('connTest',async()=>{const r=await apiFetch('/api/connection/test');const p=await r.json();setConnTest(p);setMsg(p.ok?'✅ Börse erreichbar':'❌ Keine Börse erreichbar');})} busy={busy.connTest}>🏦 Börsen testen</Btn>
+            <Btn onClick={()=>act('llmTest',async()=>{const r=await apiFetch('/api/llm/test');const p=await r.json();setLlmTest(p);const working=Object.values(p.providers||{}).filter(x=>x.ok).length;const total=Object.values(p.providers||{}).filter(x=>x.enabled!==false).length;setMsg(p.ok?`✅ ${working}/${total} LLM-Provider erreichbar`:'❌ Kein LLM erreichbar — prüfe API-Keys und Timeout');})} busy={busy.llmTest}>🤖 LLM testen</Btn>
           </div>
+
+          {/* LLM Test Results */}
+          {llmTest&&<div style={{fontSize:11,...mono,marginBottom:8}}>
+            <div style={{fontSize:12,fontWeight:600,color:C.text,marginBottom:4}}>🤖 LLM-Provider Status</div>
+            {Object.entries(llmTest.providers||{}).map(([name,r])=><div key={name} style={{display:'flex',alignItems:'flex-start',gap:6,padding:'3px 0',borderBottom:`1px solid ${C.border}11`}}>
+              <span style={{color:r.ok?C.green:r.enabled===false?C.dim:C.red,fontSize:13}}>{r.ok?'✅':r.enabled===false?'⚪':'❌'}</span>
+              <div>
+                <span style={{fontWeight:500,color:r.ok?C.green:r.enabled===false?C.muted:C.red}}>{name}</span>
+                {r.ok&&<span style={{color:C.muted}}> — {r.ms}ms Antwortzeit {r.ms>10000?'(langsam!)':r.ms>5000?'(ok)':'(schnell)'}</span>}
+                {r.enabled===false&&<span style={{color:C.dim}}> — deaktiviert</span>}
+                {r.error&&<span style={{color:C.red}}> — {r.error}</span>}
+              </div>
+            </div>)}
+            {llmTest.health&&Object.keys(llmTest.health).length>0&&<div style={{marginTop:6,fontSize:10,color:C.muted}}>
+              Gesamt-Statistik: {Object.entries(llmTest.health).map(([n,h])=><span key={n} style={{marginRight:8}}>{n}: {h.ok}✓/{h.fail}✗{h.ok>0?` ø${Math.round(h.totalMs/h.ok)}ms`:''}</span>)}
+            </div>}
+          </div>}
           {sourceTest&&<div style={{fontSize:11,...mono}}>
             {Object.entries(sourceTest.sources||{}).map(([name,s])=><div key={name} style={{display:'flex',alignItems:'flex-start',gap:6,padding:'4px 0',borderBottom:`1px solid ${C.border}11`}}>
               <span style={{color:s.working?C.green:s.enabled?C.red:C.dim,fontSize:13}}>{s.working?'✅':s.enabled?'❌':'⚪'}</span>
@@ -542,7 +561,8 @@ export default function App(){
           {/* LLM */}
           <Card title="🤖 KI & Predict" help="Für bessere Predictions. Ohne KI nutzt der Bot Heuristiken. Gemini hat kostenlosen Tier!">
             {[{key:'llm_enabled',label:'LLM aktiv',rec:true,desc:'KI für Vorhersagen nutzen.',why:'Deutlich besser als ohne.',type:'bool'},
-              {key:'llm_timeout_ms',label:'LLM Timeout (ms)',rec:12000,desc:'Max Wartezeit pro LLM-Request.',why:'12s Standard. Erhöhen bei "aborted" Fehlern (z.B. 20000).'},
+              {key:'llm_timeout_ms',label:'LLM Timeout (ms)',rec:25000,desc:'Max Wartezeit pro LLM-Request.',why:'25s ist Standard. Bei häufigen Timeouts auf 35000 erhöhen.'},
+              {key:'llm_retries',label:'LLM Retries bei Timeout',rec:2,desc:'Wie oft bei Timeout nochmal versuchen (mit doppelter Wartezeit).',why:'2 = bei Timeout wird nochmal mit 50s versucht.'},
               {key:'llm_temperature',label:'Temperature',rec:0.1,desc:'0=konsistent, 1=kreativ.',why:'0.1 für stabile Schätzungen.'},
               {key:'llm_max_tokens',label:'Max Tokens',rec:220,desc:'Max Antwortlänge der KI.',why:'220 reicht für JSON mit Wahrscheinlichkeit + Begründung.'},
               {key:'llm_require_provider',label:'LLM zwingend',rec:false,desc:'Fehler wenn keine KI antwortet (statt Heuristik-Fallback).',why:'AUS lassen — Fallback ist besser als gar kein Signal.',type:'bool'},

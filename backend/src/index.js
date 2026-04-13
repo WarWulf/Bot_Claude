@@ -34,7 +34,7 @@ import { buildPolymarketAuthHeaders, buildKalshiAuthHeaders, runPolymarketConnec
 import { websocketState, flushWsTicksBuffer, applyWebsocketConfig, stopWebsocket } from './websockets.js';
 import { scannerRuntime, scanAudit, runScanCycle, onScanFailure, ensureScanScheduler, scanAndRankMarkets } from './scanner.js';
 import { runResearchStep } from './research.js';
-import { runPredictStep, recordPredictionOutcomes } from './predict.js';
+import { runPredictStep, recordPredictionOutcomes, testLlmProvider, getProviderHealth } from './predict.js';
 import { runExecutionStep } from './execution.js';
 import { runRiskStep } from './riskEngine.js';
 import { runSkillPipeline, computeStepStatus, computeStep1Readiness, runStep1SelfTest, buildHeuristicScanRecommendation, buildImprovementReport } from './pipeline.js';
@@ -290,6 +290,22 @@ app.get('/api/sources/test', async (_, res) => {
   } else { results.gdelt = { enabled: false, working: false }; }
   const anyWorking = Object.values(results).some(r => r.working);
   res.json({ ok: anyWorking, sources: results });
+});
+
+// LLM Provider connectivity test
+app.get('/api/llm/test', async (_, res) => {
+  const state = loadState();
+  const cfg = state.config || {};
+  const providers = state.providers || {};
+  const results = {};
+  const providerNames = ['openai', 'claude', 'gemini', 'ollama_cloud', 'local_ollama', 'kimi_direct'];
+  for (const name of providerNames) {
+    const p = providers[name] || {};
+    if (!p.enabled) { results[name] = { enabled: false, ok: false }; continue; }
+    results[name] = await testLlmProvider(name, p, cfg);
+  }
+  const anyOk = Object.values(results).some(r => r.ok);
+  res.json({ ok: anyOk, providers: results, health: getProviderHealth() });
 });
 
 app.get('/api/auth/status', (_, res) => {
