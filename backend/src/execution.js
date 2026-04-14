@@ -31,6 +31,11 @@ export async function runExecutionStep(state = loadState()) {
     // Check: already have an open trade on this market?
     if (openMarketIds.has(String(p.market_id))) { skipped += 1; duplicateBlocked += 1; continue; }
 
+    // Check: market expired?
+    const marketData = (state.scan_results || []).find(m => String(m.id) === String(p.market_id)) || {};
+    if (marketData.end_date && new Date(marketData.end_date).getTime() < Date.now()) { skipped += 1; continue; }
+    if (Number(marketData.days_to_expiry) <= 0) { skipped += 1; continue; }
+
     // Check: blocked by correlation (mutually exclusive markets)?
     if (blockedByCorrelation.has(String(p.market_id))) { skipped += 1; correlationBlocked += 1; continue; }
 
@@ -40,9 +45,6 @@ export async function runExecutionStep(state = loadState()) {
 
     // Check: max concurrent positions
     if (openTrades.length + openedTrades >= Number(state.config?.max_concurrent_positions || 15)) { skipped += 1; riskBlocked += 1; continue; }
-
-    // Find original market data for expiry info
-    const marketData = (state.scan_results || []).find(m => String(m.id) === String(p.market_id)) || {};
 
     const order = { id: nextId(state.orders), time: new Date().toISOString(), market_id: p.market_id, question: p.question, direction: p.direction, confidence: Number(p.confidence || 0), edge: Number(p.edge || 0), model_prob: Number(p.model_prob || 0), market_prob: Number(p.market_prob || 0), positionUsd, status: state.config?.paper_mode ? 'PAPER_EXECUTED' : 'READY_TO_ROUTE' };
     state.orders.unshift(order);

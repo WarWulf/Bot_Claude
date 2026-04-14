@@ -69,6 +69,15 @@ export function scanAndRankMarkets(markets, cfg) {
     .filter((m) => {
       const s = String(m.status || '').toLowerCase();
       return ['open', 'active', ''].includes(s);
+    })
+    // Remove expired markets (end_date in the past)
+    .filter((m) => {
+      if (m.end_date) {
+        const endMs = new Date(m.end_date).getTime();
+        if (endMs < Date.now()) return false;
+      }
+      if (Number(m.days_to_expiry) <= 0) return false;
+      return true;
     });
   stats.after_status = result.length;
 
@@ -224,6 +233,16 @@ export async function runScanCycle({ persist = true, force = false } = {}) {
   } catch (e) {
     logLine(state, 'error', `scan fetch error: ${e.message}`);
   }
+
+  // Purge expired markets from DB
+  const beforePurge = state.markets.length;
+  state.markets = (state.markets || []).filter(m => {
+    if (m.end_date) { const endMs = new Date(m.end_date).getTime(); if (endMs < Date.now()) return false; }
+    if (Number(m.days_to_expiry) <= 0) return false;
+    return true;
+  });
+  const purged = beforePurge - state.markets.length;
+  if (purged > 0) logLine(state, 'info', `scan: purged ${purged} expired markets from DB`);
 
   state.markets = enrichMarketsWithHistory(state, state.markets || [], cfg);
   const ranked = scanAndRankMarkets(state.markets || [], cfg);

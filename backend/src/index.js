@@ -68,6 +68,15 @@ app.get('/api/state', (_, res) => {
 
 // --- Scan ---
 app.get('/api/scan', (_, res) => { const s = loadState(); res.json({ scannedAt: s.scan_runs?.[0]?.time || null, markets: s.scan_results || [], runs: s.scan_runs || [] }); });
+app.get('/api/scan/all-markets', (_, res) => {
+  const s = loadState();
+  const markets = (s.markets || []).map(m => ({
+    ...m,
+    expired: m.end_date ? new Date(m.end_date).getTime() < Date.now() : false,
+    in_top: (s.scan_results || []).some(r => r.market === m.market),
+  })).sort((a, b) => Number(b.volume || 0) - Number(a.volume || 0));
+  res.json({ ok: true, total: markets.length, markets });
+});
 
 // Diagnostic: test what APIs return raw
 app.get('/api/scan/diagnose', async (_, res) => {

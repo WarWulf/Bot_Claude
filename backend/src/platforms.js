@@ -96,6 +96,8 @@ export async function fetchPolymarketMarkets(limit = 200) {
       }
     }
     if (!daysToExpiry) daysToExpiry = 30;
+    // Skip expired markets
+    if (daysToExpiry <= 0) return null;
     const tags = Array.isArray(item.tags) ? item.tags.map(t => String(t).toLowerCase()).join(' ') : '';
     const groupSlug = String(item.groupSlug || item.group_slug || '').toLowerCase();
     return {
@@ -168,6 +170,7 @@ export async function fetchKalshiMarkets(limit = 200) {
       if (closeMs > Date.now()) daysToExpiry = Math.ceil((closeMs - Date.now()) / 86400000);
     }
     if (!daysToExpiry) daysToExpiry = 30;
+    if (daysToExpiry <= 0) return null; // Skip expired
     const question = String(item.title || item.subtitle || item.ticker || 'Kalshi Market');
     return {
       platform: 'kalshi', question,

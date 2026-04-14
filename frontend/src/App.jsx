@@ -35,8 +35,8 @@ function SettingRow({item,value,onChange}){
   </div>;
 }
 
-const TABS=['pipeline','ergebnisse','risk','settings','log'];
-const TL={pipeline:'🚀 Pipeline',ergebnisse:'📊 Ergebnisse & Trades',risk:'🛡️ Risk',settings:'⚙️ Einstellungen',log:'📋 Log'};
+const TABS=['pipeline','maerkte','ergebnisse','risk','settings','log'];
+const TL={pipeline:'🚀 Pipeline',maerkte:'🏪 Märkte',ergebnisse:'📊 Ergebnisse',risk:'🛡️ Risk',settings:'⚙️ Einstellungen',log:'📋 Log'};
 
 export default function App(){
   const [tab,setTab]=useState('pipeline');
@@ -65,6 +65,7 @@ export default function App(){
   const [scanResult,setScanResult]=useState(null);
   const [sourceTest,setSourceTest]=useState(null);
   const [llmTest,setLlmTest]=useState(null);
+  const [allMarkets,setAllMarkets]=useState([]);
 
   const apiFetch=useCallback(async(path,opts={})=>{const h={...(opts.headers||{})};if(uiPw)h['x-ui-password']=uiPw;return fetch(path,{...opts,headers:h});},[uiPw]);
   const apiJson=useCallback(async(path,fb=null)=>{try{const r=await apiFetch(path);if(!r.ok)throw 0;return await r.json();}catch{return fb;}},[apiFetch]);
@@ -85,6 +86,7 @@ export default function App(){
   useEffect(()=>{(async()=>{const r=await fetch('/api/ui-auth/status');const p=await r.json();if(!p.enabled){setUiAuthed(true);return;}const saved=localStorage.getItem('ui_pw')||'';if(!saved)return;const lr=await fetch('/api/ui-auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:saved})});if(lr.ok){setUiPw(saved);setUiAuthed(true);}else localStorage.removeItem('ui_pw');})();},[]);
   useEffect(()=>{if(uiAuthed)reload();},[uiAuthed,reload]);
   useEffect(()=>{if(!uiAuthed||tab!=='log')return;const t=setInterval(async()=>{const d=await apiJson('/api/scan/live-log',{items:[]});setLiveLog(d?.items||[]);},4000);return()=>clearInterval(t);},[tab,uiAuthed,apiJson]);
+  useEffect(()=>{if(!uiAuthed||tab!=='maerkte')return;(async()=>{const d=await apiJson('/api/scan/all-markets',{markets:[]});setAllMarkets(d?.markets||[]);})();},[tab,uiAuthed,apiJson]);
 
   async function act(key,fn){setBusy(p=>({...p,[key]:true}));try{return await fn();}catch(e){setMsg(`❌ ${e.message}`);return null;}finally{setBusy(p=>({...p,[key]:false}));await reload();}}
   async function save(){setSaving(true);try{await apiFetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config:state.config,providers:state.providers})});setMsg('✅ Gespeichert');await reload();}catch(e){setMsg('❌ '+e.message);}finally{setSaving(false);}}
@@ -395,6 +397,48 @@ export default function App(){
             <div style={{color:connTest.polymarket?.reachable?C.green:C.red}}>Polymarket: {connTest.polymarket?.reachable?`✅ erreichbar (${connTest.polymarket?.markets_sampled} Märkte)`:'❌ nicht erreichbar'}</div>
             <div style={{color:connTest.kalshi?.reachable?C.green:C.red}}>Kalshi: {connTest.kalshi?.reachable?`✅ erreichbar (${connTest.kalshi?.markets_sampled} Märkte)`:'❌ nicht erreichbar'}</div>
           </div>}
+        </Card>
+      </div>}
+
+      {/* ═══════════════════════════════════════════ */}
+      {/* TAB: MÄRKTE (alle gescannten Märkte)        */}
+      {/* ═══════════════════════════════════════════ */}
+      {tab==='maerkte'&&<div>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:14}}>
+          <Metric label="Gesamt gescannt" value={allMarkets.length}/>
+          <Metric label="Polymarket" value={allMarkets.filter(m=>m.platform==='polymarket').length}/>
+          <Metric label="Kalshi" value={allMarkets.filter(m=>m.platform==='kalshi').length}/>
+          <Metric label="Im Top-N" value={allMarkets.filter(m=>m.in_top).length} help="Diese Märkte gehen in die Pipeline"/>
+        </div>
+        <Card title="Kategorien" help="Wie viele Märkte pro Kategorie gescannt wurden.">
+          <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
+            {Object.entries(allMarkets.reduce((acc,m)=>{const c=m.category||'other';acc[c]=(acc[c]||0)+1;return acc;},{})).sort((a,b)=>b[1]-a[1]).map(([cat,count])=>
+              <span key={cat} style={{fontSize:10,padding:'3px 8px',borderRadius:10,background:`${C.cyan}12`,color:C.cyan,...mono}}>{cat}: {count}</span>
+            )}
+          </div>
+        </Card>
+        <Card title={`Alle Märkte (${allMarkets.length})`} help="Alle gescannten Märkte sortiert nach Volume. Gelb markiert = im Top-N für die Pipeline. Keine Duplikate.">
+          <div style={{maxHeight:500,overflow:'auto'}}>
+            {allMarkets.map((m,i)=>{
+              const isTop=m.in_top;
+              const remainDays=Number(m.days_to_expiry||0);
+              const endStr=m.end_date?new Date(m.end_date).toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'2-digit'}):'';
+              return<div key={i} style={{padding:'5px 0',borderBottom:`1px solid ${C.border}11`,background:isTop?`${C.cyan}08`:'transparent'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                  <span style={{fontSize:12,flex:1}}>{isTop&&<span title="In der Pipeline" style={{color:C.cyan}}>★ </span>}{m.question}</span>
+                  <span style={{fontSize:10,...mono,color:C.muted}}>P:{fmt(m.market_price,2)}</span>
+                </div>
+                <div style={{display:'flex',gap:8,fontSize:10,...mono,color:C.muted,marginTop:2,flexWrap:'wrap'}}>
+                  <span style={{fontSize:9,padding:'1px 4px',borderRadius:3,background:m.platform==='kalshi'?`${C.purple}20`:`${C.cyan}20`,color:m.platform==='kalshi'?C.purple:C.cyan}}>{m.platform}</span>
+                  {m.category&&m.category!=='other'&&<span style={{fontSize:9,padding:'1px 4px',borderRadius:3,background:`${C.amber}15`,color:C.amber}}>{m.category}</span>}
+                  <span>Vol:{Number(m.volume||0).toLocaleString()}</span>
+                  <span>Liq:{Number(m.liquidity||0).toLocaleString()}</span>
+                  {remainDays>0&&<span>📅{remainDays}T{endStr?` (${endStr})`:''}</span>}
+                  {m.opportunity_score&&<span>Score:{fmt(m.opportunity_score,0)}</span>}
+                </div>
+              </div>;})}
+            {!allMarkets.length&&<div style={{color:C.muted,fontSize:12,padding:10}}>Keine Märkte gescannt. Starte einen Scan im Pipeline-Tab.</div>}
+          </div>
         </Card>
       </div>}
 
