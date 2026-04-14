@@ -74,32 +74,23 @@ app.get('/api/scan/diagnose', async (_, res) => {
   const state = loadState();
   const cfg = state.config || {};
   const diag = { polymarket: { raw: 0, error: null }, kalshi: { raw: 0, error: null }, filters: {}, scanner: {} };
-  try {
-    const pmMarkets = await fetchPolymarketMarkets(200);
-    diag.polymarket.raw = pmMarkets.length;
-    diag.polymarket.sample = pmMarkets.slice(0, 3).map(m => ({ q: m.question?.slice(0, 60), price: m.market_price, vol: m.volume, liq: m.liquidity, days: m.days_to_expiry, cat: m.category }));
-  } catch (e) { diag.polymarket.error = String(e.message).slice(0, 100); }
-  try {
-    const kaMarkets = await fetchKalshiMarkets(200);
-    diag.kalshi.raw = kaMarkets.length;
-    diag.kalshi.sample = kaMarkets.slice(0, 3).map(m => ({ q: m.question?.slice(0, 60), price: m.market_price, vol: m.volume, liq: m.liquidity, days: m.days_to_expiry, cat: m.category }));
-  } catch (e) { diag.kalshi.error = String(e.message).slice(0, 100); }
-  // Show filter settings
-  diag.filters = { min_volume: cfg.scanner_min_volume, min_liquidity: cfg.scanner_min_liquidity, max_days: cfg.scanner_max_days, min_anomaly: cfg.scanner_min_anomaly_score, categories: cfg.scanner_market_categories || '(alle)', min_price: cfg.min_market_price, max_price: cfg.max_market_price };
-  // Try ranking
-  const allMarkets = [...(await fetchPolymarketMarkets(200).catch(() => [])), ...(await fetchKalshiMarkets(200).catch(() => []))];
+  let pmMarkets = [], kaMarkets = [];
+  try { pmMarkets = await fetchPolymarketMarkets(200); diag.polymarket.raw = pmMarkets.length; diag.polymarket.sample = pmMarkets.slice(0, 3).map(m => ({ q: m.question?.slice(0, 60), price: m.market_price, vol: m.volume, liq: m.liquidity, days: m.days_to_expiry, cat: m.category })); } catch (e) { diag.polymarket.error = String(e.message).slice(0, 150); }
+  try { kaMarkets = await fetchKalshiMarkets(200); diag.kalshi.raw = kaMarkets.length; diag.kalshi.sample = kaMarkets.slice(0, 3).map(m => ({ q: m.question?.slice(0, 60), price: m.market_price, vol: m.volume, liq: m.liquidity, days: m.days_to_expiry, cat: m.category })); } catch (e) { diag.kalshi.error = String(e.message).slice(0, 150); }
+  diag.filters = { min_volume: cfg.scanner_min_volume ?? '(default 200)', min_liquidity: cfg.scanner_min_liquidity ?? '(default 0)', max_days: cfg.scanner_max_days ?? '(default 90)', categories: cfg.scanner_market_categories || '(alle — kein Filter)', min_price: cfg.min_market_price ?? 0.05, max_price: cfg.max_market_price ?? 0.95, max_slippage: cfg.scanner_max_slippage_pct ?? 0.10 };
+  const allMarkets = [...pmMarkets, ...kaMarkets];
   const ranked = scanAndRankMarkets(allMarkets, cfg);
-  diag.scanner = { total_fetched: allMarkets.length, after_ranking: ranked.length };
-  // Show what gets filtered out
+  diag.scanner = { total_fetched: allMarkets.length, after_ranking: ranked.length, filter_stats: scannerRuntime.lastFilterStats || {}, markets_in_db: (state.markets || []).length };
   if (ranked.length === 0 && allMarkets.length > 0) {
     const reasons = [];
     const sample = allMarkets[0];
-    if (Number(sample?.volume || 0) < Number(cfg.scanner_min_volume || 200)) reasons.push(`Volume ${sample?.volume} < min ${cfg.scanner_min_volume}`);
-    if (Number(sample?.liquidity || 0) < Number(cfg.scanner_min_liquidity || 200)) reasons.push(`Liquidity ${sample?.liquidity} < min ${cfg.scanner_min_liquidity}`);
-    if (cfg.scanner_market_categories) reasons.push(`Category filter: "${cfg.scanner_market_categories}" — might be filtering everything`);
+    if (Number(sample?.volume || 0) < Number(cfg.scanner_min_volume || 200)) reasons.push(`Volume ${sample?.volume} < min_volume ${cfg.scanner_min_volume || 200}. LÖSUNG: Setze Min Volume auf 200.`);
+    if (Number(cfg.scanner_min_liquidity || 0) > 0 && Number(sample?.liquidity || 0) < Number(cfg.scanner_min_liquidity)) reasons.push(`Liquidity ${sample?.liquidity} < min_liquidity ${cfg.scanner_min_liquidity}. LÖSUNG: Setze Min Liquidität auf 0.`);
+    if (cfg.scanner_market_categories) reasons.push(`Category filter "${cfg.scanner_market_categories}" aktiv — vielleicht filtert er alles raus. LÖSUNG: Feld leeren.`);
     diag.scanner.filter_reasons = reasons;
-    diag.scanner.first_market_raw = { q: sample?.question?.slice(0, 80), vol: sample?.volume, liq: sample?.liquidity, days: sample?.days_to_expiry, cat: sample?.category };
+    diag.scanner.first_market = { q: sample?.question?.slice(0, 80), vol: sample?.volume, liq: sample?.liquidity, days: sample?.days_to_expiry, cat: sample?.category, price: sample?.market_price };
   }
+  diag.recommendation = ranked.length > 0 ? 'Scan funktioniert.' : allMarkets.length > 0 ? `APIs liefern ${allMarkets.length} Märkte aber alle werden rausgefiltert. Prüfe Scanner-Einstellungen!` : 'APIs liefern 0 Märkte. Prüfe Netzwerk-Verbindung (docker logs).';
   res.json(diag);
 });
 

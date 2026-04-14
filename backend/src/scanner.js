@@ -14,26 +14,21 @@ function loadFailurePatterns() {
     if (!existsSync(logPath)) return new Set();
     const content = readFileSync(logPath, 'utf8');
     const patterns = new Set();
-    // Extract market names from "### Date — Market Name" lines
     const matches = content.match(/^###\s+.+?—\s+(.+)$/gm) || [];
     for (const m of matches) {
       const name = m.replace(/^###\s+.+?—\s+/, '').trim().toLowerCase();
-      if (name.length > 3) patterns.add(name);
+      if (name.length > 10) patterns.add(name); // Only skip exact matches, not short words
     }
     return patterns;
   } catch { return new Set(); }
 }
 
 export const scannerRuntime = {
-  consecutiveFailures: 0,
-  breakerUntil: 0,
-  lastSuccessAt: null,
-  lastFailureAt: null,
-  lastError: '',
-  lastDurationMs: 0,
-  avgDurationMs: 0,
-  runsMeasured: 0,
-  lastCoverage: { polymarket: 0, kalshi: 0, total: 0 }
+  consecutiveFailures: 0, breakerUntil: 0, lastSuccessAt: null,
+  lastFailureAt: null, lastError: '', lastDurationMs: 0,
+  avgDurationMs: 0, runsMeasured: 0,
+  lastCoverage: { polymarket: 0, kalshi: 0, total: 0 },
+  lastFilterStats: {}, // Track why markets got filtered
 };
 
 export function scanAudit(state, event, details = {}) {
@@ -44,75 +39,119 @@ export function scanAudit(state, event, details = {}) {
 
 export function scanAndRankMarkets(markets, cfg) {
   const minVolume = Number(cfg.scanner_min_volume || 200);
-  const minLiquidity = Number(cfg.scanner_min_liquidity || 200);
-  const maxDays = Number(cfg.scanner_max_days || 30);
-  const spreadThreshold = Number(cfg.scanner_max_spread || 0.05);
-  const priceMoveThreshold = Number(cfg.scanner_price_move_threshold || 0.1);
-  const volumeSpikeRatio = Number(cfg.scanner_volume_spike_ratio || 2);
-  const minAnomalyScore = Number(cfg.scanner_min_anomaly_score || 1);
-  const maxSlippage = Number(cfg.scanner_max_slippage_pct || 0.02);
+  const minLiquidity = Number(cfg.scanner_min_liquidity || 0); // Default 0 — many markets have 0 liquidity field
+  const maxDays = Number(cfg.scanner_max_days || 90); // 90 days default, not 30
+  const maxSlippage = Number(cfg.scanner_max_slippage_pct || 0.10); // 10% default, not 2%
+  const minPrice = Number(cfg.min_market_price || 0.05);
+  const maxPrice = Number(cfg.max_market_price || 0.95);
 
-  // Load past failures to avoid repeating mistakes
   const failurePatterns = loadFailurePatterns();
 
-  // Category filter — let user focus on finance, politics etc.
+  // Category filter
   const categoryFilter = String(cfg.scanner_market_categories || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
   const CATEGORY_KEYWORDS = {
-    finance: ['stock','s&p','nasdaq','dow','treasury','fed','interest rate','gdp','inflation','earnings','ipo','market cap','forex','bond','yield','recession','unemployment','jobs','cpi','ppi','fomc'],
-    crypto: ['bitcoin','btc','eth','ethereum','crypto','solana','sol','defi','nft','blockchain','binance','coinbase','dogecoin','xrp','cardano','polygon','matic'],
-    politics: ['election','president','congress','senate','governor','vote','ballot','democrat','republican','trump','biden','legislation','bill','law','supreme court','impeach','primary','nomination','cabinet','veto','executive order'],
-    sports: ['nfl','nba','mlb','nhl','fifa','world cup','super bowl','championship','playoff','soccer','football','basketball','baseball','tennis','f1','ufc','olympics','grand slam','premier league','champions league'],
-    weather: ['temperature','rain','snow','hurricane','tornado','weather','climate','heat','cold','storm','flood','wildfire','drought','celsius','fahrenheit'],
-    tech: ['ai ','artificial intelligence','openai','google','apple','microsoft','meta','nvidia','spacex','launch','rocket','semiconductor','chip','quantum','robot'],
-    entertainment: ['oscar','grammy','emmy','movie','film','album','concert','netflix','disney','spotify','box office','streaming','award','celebrity','tv show'],
-    economy: ['gdp','unemployment','trade','tariff','sanction','export','import','supply chain','housing','real estate','mortgage','debt','default','bankruptcy','stimulus'],
-    legal: ['trial','verdict','guilty','lawsuit','indictment','ruling','judge','court','settlement','prosecution','appeal','subpoena','testimony'],
-    science: ['nasa','space','mars','climate change','vaccine','fda','drug','pharmaceutical','pandemic','outbreak','earthquake','volcano','species'],
-    geopolitics: ['war','conflict','nato','china','russia','ukraine','taiwan','iran','israel','gaza','north korea','sanctions','ceasefire','treaty','alliance'],
+    finance: ['stock','s&p','nasdaq','dow','treasury','fed','interest rate','gdp','inflation','earnings','ipo','forex','bond','yield','recession','unemployment','jobs','cpi','fomc'],
+    crypto: ['bitcoin','btc','eth','ethereum','crypto','solana','defi','blockchain','binance','coinbase','dogecoin','xrp'],
+    politics: ['election','president','congress','senate','governor','vote','democrat','republican','trump','biden','legislation','bill','law','supreme court','impeach','nomination'],
+    sports: ['nfl','nba','mlb','nhl','fifa','world cup','super bowl','championship','playoff','soccer','football','basketball','baseball','tennis','f1','ufc','olympics'],
+    weather: ['temperature','rain','snow','hurricane','tornado','weather','storm','flood','wildfire'],
+    tech: ['openai','google','apple','microsoft','nvidia','spacex','semiconductor','quantum','robot'],
+    entertainment: ['oscar','grammy','emmy','movie','film','netflix','disney','streaming','award'],
+    economy: ['gdp','unemployment','tariff','sanction','housing','mortgage','debt','bankruptcy'],
+    legal: ['trial','verdict','guilty','lawsuit','indictment','ruling','court','settlement'],
+    geopolitics: ['war','conflict','nato','china','russia','ukraine','taiwan','iran','israel','ceasefire'],
   };
 
-  return markets
-    .filter((m) => ['open', 'active', ''].includes(String(m.status || '').toLowerCase()))
-    // Category filter
+  // Track filter stats for debugging
+  const stats = { input: markets.length };
+
+  const result = markets
     .filter((m) => {
+      const s = String(m.status || '').toLowerCase();
+      return ['open', 'active', ''].includes(s);
+    });
+  stats.after_status = result.length;
+
+  const afterCategory = result.filter((m) => {
       if (!categoryFilter.length) return true;
       const q = String(m.question || m.market || '').toLowerCase();
       return categoryFilter.some(cat => {
         const keywords = CATEGORY_KEYWORDS[cat] || [cat];
         return keywords.some(kw => q.includes(kw));
       });
-    })
-    // Skip markets that match past failures
-    .filter((m) => {
-      const q = String(m.question || m.market || '').toLowerCase();
+    });
+  stats.after_category = afterCategory.length;
+
+  const afterFailure = afterCategory.filter((m) => {
+      if (!failurePatterns.size) return true;
+      const q = String(m.question || '').toLowerCase();
       for (const pattern of failurePatterns) {
-        if (q.includes(pattern) || pattern.includes(q.slice(0, 20))) return false;
+        if (q === pattern) return false;
       }
       return true;
-    })
+    });
+  stats.after_failure = afterFailure.length;
+
+  const afterPrice = afterFailure.filter((m) => {
+      const p = Number(m.market_price || 0);
+      return p >= minPrice && p <= maxPrice;
+    });
+  stats.after_price = afterPrice.length;
+
+  const afterVolume = afterPrice.filter((m) => Number(m.volume || 0) >= minVolume);
+  stats.after_volume = afterVolume.length;
+
+  const afterLiquidity = afterVolume.filter((m) => minLiquidity <= 0 || Number(m.liquidity || 0) >= minLiquidity);
+  stats.after_liquidity = afterLiquidity.length;
+
+  const afterDays = afterLiquidity.filter((m) => Number(m.days_to_expiry || 999) <= maxDays);
+  stats.after_days = afterDays.length;
+
+  const afterSlippage = afterDays.filter((m) => estimateSlippage(m) <= maxSlippage);
+  stats.after_slippage = afterSlippage.length;
+
+  // Console log the filter breakdown for docker logs
+  console.log(`[scanner] Filter: ${stats.input} → status:${stats.after_status} → cat:${stats.after_category} → fail:${stats.after_failure} → price:${stats.after_price} → vol(≥${minVolume}):${stats.after_volume} → liq(≥${minLiquidity}):${stats.after_liquidity} → days(≤${maxDays}):${stats.after_days} → slip(≤${maxSlippage}):${stats.after_slippage}`);
+
+  if (afterSlippage.length === 0 && markets.length > 0) {
+    const sample = markets[0];
+    console.log(`[scanner] ALL FILTERED! Sample: "${(sample.question||'').slice(0,50)}" price=${sample.market_price} vol=${sample.volume} liq=${sample.liquidity} days=${sample.days_to_expiry} slip=${estimateSlippage(sample).toFixed(4)}`);
+  }
+
+  const scored = afterSlippage
     .map((m) => {
       const price = Number(m.market_price || 0);
       const prevPrice = Number(m.prev_market_price || price);
       const spread = Number(m.spread || 0);
       const volume = Number(m.volume || 0);
       const volumeAvg = Number(m.volume_7d_avg || 0);
-      const slippage = estimateSlippage(m);
       const priceMove = Math.abs(price - prevPrice);
-      const volumeSpike = volumeAvg > 0 ? volume / volumeAvg : 0;
+      const volumeSpike = volumeAvg > 0 ? volume / volumeAvg : 1;
       const anomalies = {
-        sudden_price_move: priceMove > priceMoveThreshold,
-        wide_spread: spread > spreadThreshold,
-        volume_spike: volumeSpike > volumeSpikeRatio
+        sudden_price_move: priceMove > 0.10,
+        wide_spread: spread > 0.05,
+        volume_spike: volumeSpike > 2
       };
-      const anomalyScore = (anomalies.sudden_price_move ? 40 : 0) + (anomalies.wide_spread ? 30 : 0) + (anomalies.volume_spike ? 30 : 0) + Math.min(20, volume / 10000) + Math.min(20, Number(m.liquidity || 0) / 10000);
-      return { ...m, estimated_slippage: Number(slippage.toFixed(4)), price_move: Number(priceMove.toFixed(4)), volume_spike_ratio: Number(volumeSpike.toFixed(2)), anomaly_flags: Object.entries(anomalies).filter(([, v]) => v).map(([k]) => k), opportunity_score: Number(anomalyScore.toFixed(2)) };
+      const volumeScore = Math.min(30, Math.log10(Math.max(1, volume)) * 6);
+      const liquidityScore = Math.min(20, Math.log10(Math.max(1, Number(m.liquidity || 1))) * 4);
+      const edgePotential = Math.min(20, Math.abs(price - 0.5) * 40);
+      const anomalyBonus = (anomalies.sudden_price_move ? 15 : 0) + (anomalies.wide_spread ? 5 : 0) + (anomalies.volume_spike ? 10 : 0);
+      const score = volumeScore + liquidityScore + edgePotential + anomalyBonus;
+      return {
+        ...m,
+        estimated_slippage: Number(estimateSlippage(m).toFixed(4)),
+        price_move: Number(priceMove.toFixed(4)),
+        volume_spike_ratio: Number(volumeSpike.toFixed(2)),
+        anomaly_flags: Object.entries(anomalies).filter(([, v]) => v).map(([k]) => k),
+        opportunity_score: Number(score.toFixed(2))
+      };
     })
-    .filter((m) => Number(m.volume || 0) >= minVolume)
-    .filter((m) => Number(m.liquidity || 0) >= minLiquidity)
-    .filter((m) => Number(m.days_to_expiry || 999) <= maxDays)
-    .filter((m) => Number(m.opportunity_score || 0) >= minAnomalyScore)
-    .filter((m) => Number(m.estimated_slippage || 0) <= maxSlippage)
     .sort((a, b) => b.opportunity_score - a.opportunity_score);
+
+  console.log(`[scanner] Final result: ${scored.length} tradeable markets`);
+  stats.output = scored.length;
+  scannerRuntime.lastFilterStats = stats;
+  return scored;
 }
 
 export function enrichMarketsWithHistory(state, markets, cfg) {
@@ -159,42 +198,50 @@ export async function runScanCycle({ persist = true, force = false } = {}) {
   if (!force && scannerRuntime.breakerUntil > now) {
     const waitSec = Math.ceil((scannerRuntime.breakerUntil - now) / 1000);
     logLine(state, 'warning', `scan skipped: circuit breaker open (${waitSec}s remaining)`);
-    scanAudit(state, 'scan_skipped_breaker_open', { wait_sec: waitSec, source });
-    if (persist) saveState(state);
-    return { state, ranked: state.scan_results || [], added: 0, source, skipped: true, breaker_open: true };
-  }
-  if (!force && !isWithinActiveHours(cfg)) {
-    logLine(state, 'info', 'scan skipped: outside active hours');
-    scanAudit(state, 'scan_skipped_outside_active_hours', { source });
     if (persist) saveState(state);
     return { state, ranked: state.scan_results || [], added: 0, source, skipped: true };
   }
 
-  scanAudit(state, 'scan_started', { source, force, min_price: minPrice, max_price: maxPrice });
+  scanAudit(state, 'scan_started', { source, force });
   pushLiveComm('scan_started', { source, force: Boolean(force) });
 
-  if (source === 'polymarket') {
-    const markets = await fetchPolymarketMarkets(300);
-    added = upsertScannedMarkets(state, markets, 'polymarket-api', minPrice, maxPrice);
-    scanAudit(state, 'scan_source_processed', { source: 'polymarket', fetched: markets.length, added });
-  } else if (source === 'kalshi') {
-    const markets = await fetchKalshiMarkets(300);
-    added = upsertScannedMarkets(state, markets, 'kalshi-api', minPrice, maxPrice);
-    scanAudit(state, 'scan_source_processed', { source: 'kalshi', fetched: markets.length, added });
-  } else {
-    const polymarket = await fetchPolymarketMarkets(300);
-    const kalshi = await fetchKalshiMarkets(300);
-    added = upsertScannedMarkets(state, [...polymarket, ...kalshi], 'both-api', minPrice, maxPrice);
-    scanAudit(state, 'scan_source_processed', { source: 'both', fetched_total: polymarket.length + kalshi.length, added });
+  try {
+    if (source === 'polymarket') {
+      const markets = await fetchPolymarketMarkets(300);
+      added = upsertScannedMarkets(state, markets, 'polymarket-api', minPrice, maxPrice);
+      logLine(state, 'info', `polymarket: fetched ${markets.length} raw, added ${added} new`);
+    } else if (source === 'kalshi') {
+      const markets = await fetchKalshiMarkets(300);
+      added = upsertScannedMarkets(state, markets, 'kalshi-api', minPrice, maxPrice);
+      logLine(state, 'info', `kalshi: fetched ${markets.length} raw, added ${added} new`);
+    } else {
+      let pmCount = 0, kaCount = 0;
+      try { const pm = await fetchPolymarketMarkets(300); pmCount = pm.length; added += upsertScannedMarkets(state, pm, 'polymarket-api', minPrice, maxPrice); } catch (e) { logLine(state, 'warning', `polymarket fetch failed: ${e.message}`); }
+      try { const ka = await fetchKalshiMarkets(300); kaCount = ka.length; added += upsertScannedMarkets(state, ka, 'kalshi-api', minPrice, maxPrice); } catch (e) { logLine(state, 'warning', `kalshi fetch failed: ${e.message}`); }
+      logLine(state, 'info', `scan: pm=${pmCount} ka=${kaCount} added=${added} total_in_db=${state.markets.length}`);
+      if (pmCount === 0 && kaCount === 0) logLine(state, 'error', 'scan: BOTH APIs returned 0 markets! Check network connectivity.');
+    }
+  } catch (e) {
+    logLine(state, 'error', `scan fetch error: ${e.message}`);
   }
 
   state.markets = enrichMarketsWithHistory(state, state.markets || [], cfg);
   const ranked = scanAndRankMarkets(state.markets || [], cfg);
   state.scan_results = ranked.slice(0, Number(cfg.top_n || 10));
+
+  // Log filter results so user can see why markets get filtered
+  const filterStats = scannerRuntime.lastFilterStats || {};
+  if (ranked.length === 0 && state.markets.length > 0) {
+    logLine(state, 'warning', `scan: ${state.markets.length} markets in DB but 0 passed filters! Filter reasons in docker logs.`);
+  }
+  logLine(state, 'info', `scan result: ${state.markets.length} total → ${ranked.length} tradeable → top ${state.scan_results.length}`);
+
   state.scan_runs = state.scan_runs || [];
-  state.scan_runs.unshift({ time: new Date().toISOString(), source, scanned_total: state.markets.length, tradeable_count: ranked.length, added });
+  state.scan_runs.unshift({ time: new Date().toISOString(), source, scanned_total: state.markets.length, tradeable_count: ranked.length, added, filter_stats: scannerRuntime.lastFilterStats });
   state.scan_runs = state.scan_runs.slice(0, 100);
-  logLine(state, 'info', `scan cycle complete source=${source} tradeable=${ranked.length} added=${added}`);
+  state.scanner_health = { total: state.markets.length, tradeable: ranked.length, filter_stats: scannerRuntime.lastFilterStats };
+
+  logLine(state, 'info', `scan complete: ${state.markets.length} total → ${ranked.length} tradeable (filters: ${JSON.stringify(scannerRuntime.lastFilterStats)})`);
 
   scannerRuntime.consecutiveFailures = 0;
   scannerRuntime.breakerUntil = 0;
@@ -205,7 +252,7 @@ export async function runScanCycle({ persist = true, force = false } = {}) {
   scannerRuntime.runsMeasured += 1;
   scannerRuntime.avgDurationMs = Number((((scannerRuntime.avgDurationMs * (scannerRuntime.runsMeasured - 1)) + duration) / scannerRuntime.runsMeasured).toFixed(2));
   scannerRuntime.lastCoverage = { polymarket: state.markets.filter((m) => m.platform === 'polymarket').length, kalshi: state.markets.filter((m) => m.platform === 'kalshi').length, total: state.markets.length };
-  scanAudit(state, 'scan_completed', { source, duration_ms: duration, added, tradeable_count: ranked.length, scanned_total: state.markets.length, coverage: scannerRuntime.lastCoverage });
+
   pushLiveComm('scan_completed', { source, tradeable_count: ranked.length, scanned_total: state.markets.length, duration_ms: duration });
 
   if (persist) saveState(state);
@@ -226,14 +273,13 @@ export function onScanFailure(error, cfg = {}) {
 let scanTimer = null;
 export function ensureScanScheduler() {
   const state = loadState();
-  const everyMinutes = Math.max(15, Math.min(30, Number(state.config.scan_interval_minutes || 15)));
+  const everyMinutes = Math.max(5, Math.min(60, Number(state.config.scan_interval_minutes || 15)));
   if (scanTimer) clearInterval(scanTimer);
   scanTimer = setInterval(() => {
     runScanCycle().catch((e) => {
       const s = loadState();
       onScanFailure(e, s.config || {});
       logLine(s, 'error', `scheduled scan failed: ${e.message}`);
-      scanAudit(s, 'scan_failed_scheduled', { error: e.message });
       saveState(s);
     });
   }, everyMinutes * 60 * 1000);

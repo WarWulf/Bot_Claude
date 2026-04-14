@@ -275,7 +275,7 @@ export default function App(){
         <Card title="Aktionen">
           <div style={{display:'flex',flexWrap:'wrap',gap:6,marginBottom:10}}>
             <Btn onClick={()=>act('pipeline',async()=>{const r=await apiFetch('/api/pipeline/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const p=await r.json();if(!p.ok)throw new Error(p.message);setMsg('✅ Pipeline fertig — alle 5 Schritte durchlaufen');})} busy={busy.pipeline} help="Alle 5 Schritte nacheinander">🚀 Full Pipeline</Btn>
-            <Btn onClick={()=>act('scan',async()=>{const r=await apiFetch('/api/scan/run',{method:'POST'});const p=await r.json();if(!p.ok)throw new Error(p.message);setScanResult(p);setMsg(`✅ Scan: ${p.tradeable_count} Märkte, Self-Test ${p.self_test?.ok?'✅ bestanden':`⚠️ ${p.self_test?.passed}/${p.self_test?.total}`}`);})} busy={busy.scan} help="Märkte suchen und filtern">🔍 Scan</Btn>
+            <Btn onClick={()=>act('scan',async()=>{const r=await apiFetch('/api/scan/run',{method:'POST'});const p=await r.json();if(!p.ok)throw new Error(p.message);setScanResult(p);const fs=p.step_status?.step1?.readiness||{};setMsg(`✅ Scan: ${p.tradeable_count} tradeable von ${p.scanner_health?.total||'?'} gesamt`);})} busy={busy.scan} help="Märkte suchen und filtern">🔍 Scan</Btn>
             <Btn onClick={()=>act('research',async()=>{const r=await apiFetch('/api/research/run',{method:'POST'});const p=await r.json();if(!p.ok)throw new Error(p.message);setMsg(`✅ Research: ${(p.briefs||[]).length} Briefs`);})} busy={busy.research} help="Nachrichten sammeln">📰 Research</Btn>
             <Btn onClick={()=>act('predict',async()=>{const r=await apiFetch('/api/predict/run',{method:'POST'});const p=await r.json();if(!p.ok)throw new Error(p.message);setMsg(`✅ Predict: ${(p.predictions||[]).length} Signale, ${p.summary?.actionable_pct||0}% actionable`);})} busy={busy.predict} help="Wahrscheinlichkeiten schätzen">🎯 Predict</Btn>
             <Btn onClick={()=>act('execute',async()=>{const r=await apiFetch('/api/execute/run',{method:'POST'});const p=await r.json();if(!p.ok)throw new Error(p.message);setMsg(`✅ Execute: ${p.summary?.executed_orders||0} Orders`);})} busy={busy.execute} help="Trades platzieren">⚡ Execute</Btn>
@@ -285,6 +285,7 @@ export default function App(){
             <Btn variant={cfg.kill_switch?'danger':'warn'} onClick={()=>act('kill',async()=>{await apiFetch('/api/kill-switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!cfg.kill_switch})});setMsg(cfg.kill_switch?'✅ Kill Switch aus':'⚠️ Kill Switch AN — keine neuen Trades');})}>{cfg.kill_switch?'🔴 Kill AUS':'🛑 Kill Switch'}</Btn>
             <Btn variant="warn" onClick={()=>act('resetM',async()=>{const r=await apiFetch('/api/markets/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:'ui'})});const p=await r.json();if(!p.ok)throw new Error(p.message);setMsg(`✅ ${p.previous_markets} Märkte gelöscht. Scanne neu.`);})} busy={busy.resetM} help="Löscht Märkte, Research, Predictions">🗑 Märkte Reset</Btn>
             <Btn variant="danger" onClick={()=>{if(!confirm('Alle Trades löschen?'))return;act('resetT',async()=>{const r=await apiFetch('/api/trades/reset',{method:'POST'});const p=await r.json();if(!p.ok)throw new Error(p.message);setMsg(`✅ ${p.previous_trades} Trades gelöscht.`);});}} busy={busy.resetT} help="Löscht alle Trades und Orders">🗑 Trades Reset</Btn>
+            <Btn onClick={()=>act('diagnose',async()=>{const r=await apiFetch('/api/scan/diagnose');const p=await r.json();setMsg(`Diagnose: PM=${p.polymarket?.raw||0} raw, KA=${p.kalshi?.raw||0} raw → ${p.scanner?.after_ranking||0} nach Filter. ${p.polymarket?.error?'PM-Fehler: '+p.polymarket.error:''} ${p.kalshi?.error?'KA-Fehler: '+p.kalshi.error:''} Filter: Vol≥${p.filters?.min_volume}, Liq≥${p.filters?.min_liquidity}, Kat="${p.filters?.categories}". ${(p.scanner?.filter_reasons||[]).join('. ')}`);},true)} busy={busy.diagnose} help="Zeigt warum der Scanner keine Märkte findet">🔬 Scan Diagnose</Btn>
           </div>
         </Card>
 
@@ -434,6 +435,10 @@ export default function App(){
             </div>
           </div>)}
           {!markets.length&&<div style={{color:C.muted,fontSize:12}}>Keine Märkte. Starte einen Scan im Pipeline-Tab.</div>}
+          {state?.scanner_health?.filter_stats&&<div style={{fontSize:10,...mono,color:C.dim,marginTop:6,padding:'4px 6px',background:C.bg,borderRadius:4}}>
+            Filter: {state.scanner_health.total} geladen → {state.scanner_health.tradeable} tradeable
+            {state.scanner_health.filter_stats.input>0&&state.scanner_health.tradeable===0&&<span style={{color:C.amber}}> — Alle rausgefiltert! Senke Min Volume oder Min Liquidität.</span>}
+          </div>}
         </Card>
 
         {/* Research Search Log */}
@@ -581,9 +586,9 @@ export default function App(){
               {key:'scan_interval_minutes',label:'Intervall (Min)',rec:15,desc:'Wie oft automatisch gescannt wird.',why:'15 ist Standard.'},
               {key:'scanner_min_volume',label:'Min Volume',rec:50000,desc:'Mindest-Handelsvolumen eines Marktes.',why:'Zum Testen: 200. Produktion: 50000.'},
               {key:'scanner_min_liquidity',label:'Min Liquidität',rec:10000,desc:'Mindest-Orderbuch-Tiefe.',why:'Zum Testen: 200. Produktion: 10000.'},
-              {key:'scanner_max_days',label:'Max Tage',rec:30,desc:'Nur Märkte die in so vielen Tagen ablaufen.',why:'30 Tage ist Standard.'},
-              {key:'scanner_min_anomaly_score',label:'Min Anomalie Score',rec:1.2,desc:'Mindest-Auffälligkeits-Score.',why:'Niedriger = mehr Märkte, mehr Rauschen.'},
-              {key:'scanner_max_slippage_pct',label:'Max Slippage',rec:0.02,desc:'Max erlaubte Slippage beim Einstieg.',why:'2% schützt vor teuren Ausführungen.'},
+              {key:'scanner_max_days',label:'Max Tage',rec:90,desc:'Max Restlaufzeit.',why:'30 Tage ist Standard.'},
+              {key:'scanner_min_anomaly_score',label:'Min Anomalie Score',rec:0,desc:'Min Anomalie Score (0 = kein Filter, nur für Ranking).',why:'Niedriger = mehr Märkte, mehr Rauschen.'},
+              {key:'scanner_max_slippage_pct',label:'Max Slippage',rec:0.15,desc:'Max erlaubte Slippage.',why:'2% schützt vor teuren Ausführungen.'},
               {key:'scanner_max_spread',label:'Max Spread',rec:0.05,desc:'Spreads über diesem Wert werden als Anomalie geflaggt.',why:'5 Cent ist Standard.'},
               {key:'scanner_price_move_threshold',label:'Preisbewegung-Schwelle',rec:0.1,desc:'Preisbewegungen über diesem Wert werden geflaggt.',why:'10% = deutliche Bewegung.'},
               {key:'scanner_volume_spike_ratio',label:'Volume Spike Ratio',rec:2,desc:'Ab dem Vielfachen des 7-Tage-Schnitts gilt als Spike.',why:'2x = doppelt so viel wie normal.'},

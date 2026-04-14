@@ -10,14 +10,17 @@ export function estimateSlippage(market) {
   const ask = Number(market.ask ?? market.market_price ?? 0.5);
   const mid = (bid + ask) / 2;
   if (mid <= 0) return 0;
-  return Math.abs(ask - bid) / mid;
+  const raw = Math.abs(ask - bid) / mid;
+  // If bid and ask are the same (no orderbook data), assume 0 slippage
+  return Number.isFinite(raw) ? raw : 0;
 }
 
 export function isWithinActiveHours(cfg) {
-  const from = Number(cfg.scanner_active_from_utc ?? 6);
-  const to = Number(cfg.scanner_active_to_utc ?? 23);
-  const hour = new Date().getUTCHours();
+  const from = Number(cfg.scanner_active_from_utc ?? 0);  // Default: 24/7
+  const to = Number(cfg.scanner_active_to_utc ?? 24);      // Default: 24/7
+  if (from === 0 && to === 24) return true; // 24/7 mode
   if (from === to) return true;
+  const hour = new Date().getUTCHours();
   if (from < to) return hour >= from && hour < to;
   return hour >= from || hour < to;
 }
