@@ -22,7 +22,7 @@ import express from 'express';
 import cors from 'cors';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 
 import { loadState, saveState, logLine, buildScannerHealth, maskProviderKeys, nextId, defaultState } from './appState.js';
@@ -221,6 +221,26 @@ app.post('/api/step1/finalize', async (_, res) => {
 
 app.post('/api/markets/reset', (req, res) => { const s = loadState(); const prev = s.markets.length; s.markets = []; s.scan_results = []; s.scan_runs = []; s.scan_history = {}; s.research_briefs = []; s.predictions = []; logLine(s, 'warning', 'markets reset'); saveState(s); res.json({ ok: true, previous_markets: prev }); });
 app.post('/api/trades/reset', (req, res) => { const s = loadState(); const prev = (s.trades||[]).length; s.trades = []; s.signals = []; s.orders = []; s.execution_runs = []; s.risk = { peak_bankroll: Number(s.config?.bankroll||1000), drawdown_pct: 0, daily_realized_pnl: 0, open_exposure_usd: 0, open_positions: 0, level: 'OK' }; s.step4_summary = { completed_at: null, candidate_signals:0, executed_orders:0, skipped_orders:0, opened_trades:0, risk_blocked_orders:0, paper_mode: true }; s.compound_summary = null; s.risk_runs = []; logLine(s, 'warning', `trades reset (${prev} deleted, risk+drawdown reset)`); saveState(s); res.json({ ok: true, previous_trades: prev }); });
+
+// Full learning data reset — clears everything the bot has "learned" so it starts fresh
+app.post('/api/learning/reset', (req, res) => {
+  const s = loadState();
+  // Clear all learning data
+  s.trades = []; s.signals = []; s.orders = [];
+  s.execution_runs = []; s.risk_runs = []; s.predict_runs = []; s.research_runs = []; s.scan_runs = [];
+  s.predictions = []; s.research_briefs = []; s.scan_results = []; s.markets = [];
+  s.prediction_outcomes = []; s.prediction_log = [];
+  s.compound_summary = null; s.brier_score = null; s.brier_samples = 0;
+  s.nightly_reviews = []; s.pipeline_runs = [];
+  s.risk = { peak_bankroll: Number(s.config?.bankroll||1000), drawdown_pct: 0, daily_realized_pnl: 0, open_exposure_usd: 0, open_positions: 0, level: 'OK' };
+  s.step3_summary = null; s.step4_summary = null; s.step5_summary = null;
+  s.scan_history = {};
+  // Clear failure_log.md
+  try { const logPath = resolvePath(process.cwd(), 'predict-market-bot', 'references', 'failure_log.md'); if (existsSync(logPath)) writeFileSync(logPath, '# Failure Log\n\nAutomatically maintained by the Compound step.\n\n', 'utf8'); } catch {}
+  logLine(s, 'warning', 'FULL LEARNING RESET — all trades, predictions, brier, compound, failure_log cleared');
+  saveState(s);
+  res.json({ ok: true, message: 'All learning data reset. Bot starts fresh.' });
+});
 
 // --- Connections ---
 app.get('/api/connection/test', async (_, res) => { const cfg = loadState().config || {}; const pm = await runPolymarketConnectionTest(cfg); const ka = await runKalshiConnectionTest(cfg); res.status(pm.reachable || ka.reachable ? 200 : 503).json({ ok: pm.reachable || ka.reachable, polymarket: pm, kalshi: ka }); });

@@ -71,7 +71,8 @@ export function defaultState() {
       llm_timeout_ms: 25000,
       llm_retries: 2,
       llm_delay_between_markets_ms: 4000,
-      llm_max_tokens: 220,
+      llm_max_tokens: 500,
+      strategy_version: 3, // v3: Superforecaster prompt with decomposition + base rates
       llm_temperature: 0.1,
       llm_weight_openai: 0.35,
       llm_weight_claude: 0.25,

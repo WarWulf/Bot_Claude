@@ -80,7 +80,7 @@ async function _queryLlmOnce(providerName, providerCfg, globalCfg, prompt, timeo
 
   const body = providerName === 'claude'
     ? { model, max_tokens: maxTokens, temperature, messages: [{ role: 'user', content: prompt }] }
-    : { model, max_tokens: maxTokens, temperature, messages: [{ role: 'system', content: 'Return strict JSON only.' }, { role: 'user', content: prompt }] };
+    : { model, max_tokens: maxTokens, temperature, messages: [{ role: 'system', content: 'You are a professional superforecaster. You estimate probabilities using base rates, evidence updates, and structured reasoning. Return ONLY valid JSON with keys: probability_yes (float 0-1), confidence (float 0-1), rationale (string with your step-by-step reasoning). No markdown, no backticks.' }, { role: 'user', content: prompt }] };
 
   const endpoint = providerName === 'claude' ? `${baseUrl}/messages` : `${baseUrl}/chat/completions`;
   const resp = await fetchWithRetry(endpoint, { method: 'POST', headers, body: JSON.stringify(body) }, { label: `llm_${providerName}`, retries: 1, timeoutMs });
@@ -89,18 +89,74 @@ async function _queryLlmOnce(providerName, providerCfg, globalCfg, prompt, timeo
     ? (payload?.content || []).map((c) => c?.text || '').join('\n')
     : (payload?.choices?.[0]?.message?.content || '');
   const parsed = extractFirstJsonObject(text) || {};
-  pushLiveComm('llm_request_ok', { provider: providerName, has_probability: Number.isFinite(Number(parsed?.probability_yes)) });
+  pushLiveComm('llm_request_ok', { provider: providerName, has_probability: Number.isFinite(Number(parsed?.probability_yes)), rationale: String(parsed?.rationale || '').slice(0, 100) });
   return parsed;
 }
 
 export async function buildLlmEnsembleEstimate(market, brief = {}, cfg = {}, providers = {}) {
   if (cfg.llm_enabled === false) return { estimates: {}, notes: ['llm_disabled'] };
-  const prompt = ['Return strict JSON only with keys: probability_yes (0..1), confidence (0..1), rationale (short string).', `Market: ${market.question}`, `Market price YES: ${Number(market.market_price || 0.5).toFixed(4)}`, `Research sentiment: ${brief.sentiment || 'neutral'}`, `Research confidence: ${Number(brief.confidence || 0.4).toFixed(3)}`, `Narrative gap: ${Number(brief.consensus_vs_market_gap || 0).toFixed(3)}`].join('\n');
+
+  // Collect evidence for the prompt
+  const headlines = (brief.sources || []).filter(s => s.title && s.source_type !== 'none').slice(0, 6).map(s => `  • ${s.title} [${s.source_type}${s.domain ? ', '+s.domain : ''}]`).join('\n');
+  const daysLeft = Number(market.days_to_expiry || 30);
+  const endDate = market.end_date ? new Date(market.end_date).toISOString().slice(0, 10) : '';
+  const volume = Number(market.volume || 0);
+  const spread = Number(market.spread || 0);
+  const category = market.category || 'other';
+  const marketPricePct = (Number(market.market_price || 0.5) * 100).toFixed(1);
+  const catalysts = (brief.catalysts || []).slice(0, 2).map(c => `  • ${c}`).join('\n');
+
+  const prompt = `You are a professional superforecaster working at a prediction market fund. You use a rigorous, evidence-based methodology to estimate probabilities. You are known for being well-calibrated: when you say 70%, it happens 70% of the time.
+
+═══ MARKET ═══
+Question: ${market.question}
+Category: ${category}
+Current YES price: ${marketPricePct}% (this is what the market thinks — you may disagree)
+Expires: ${daysLeft} days remaining${endDate ? ` (${endDate})` : ''}
+Volume: ${volume.toLocaleString()} contracts traded
+Spread: ${(spread * 100).toFixed(1)} cents
+
+═══ EVIDENCE ═══
+${headlines ? `Recent headlines:\n${headlines}` : 'No specific headlines found for this market.'}
+${catalysts ? `\nKey catalysts:\n${catalysts}` : ''}
+
+Sentiment analysis: ${brief.sentiment || 'neutral'}${brief.sentiment_breakdown ? ` (${brief.sentiment_breakdown.bullish} bullish / ${brief.sentiment_breakdown.bearish} bearish / ${brief.sentiment_breakdown.neutral} neutral sources)` : ''}
+Evidence quality: ${brief.stance === 'supported' ? 'Strong — multiple credible sources agree' : brief.stance === 'mixed' ? 'Mixed — sources disagree' : 'Weak — limited or no credible sources'}
+${brief.thesis ? `Research thesis: ${brief.thesis}` : ''}
+${(brief.risks || []).length ? `Known risks: ${brief.risks.join('; ')}` : ''}
+
+═══ YOUR ANALYSIS FRAMEWORK ═══
+Think through these steps before giving your estimate:
+
+1. DECOMPOSE: What specific conditions must be true for YES to win?
+2. BASE RATE: For this type of event (${category}), how often does something like this happen? Start with that as your anchor, not the market price.
+3. EVIDENCE UPDATE: Does the news/evidence push the probability UP or DOWN from the base rate? By how much?
+4. STRONGEST CASE FOR YES: What is the single strongest argument that this will happen?
+5. STRONGEST CASE FOR NO: What is the single strongest argument that this won't happen?
+6. MARKET INTELLIGENCE: The market is at ${marketPricePct}%. Why might the market be WRONG? Consider: thin volume means less informed pricing. High volume means smart money has already priced it.
+7. TIME FACTOR: With ${daysLeft} days left, how certain can we be? More time = more uncertainty.
+
+═══ CALIBRATION GUIDE ═══
+• 90-95%: Almost certain. Only a major surprise prevents this.
+• 70-85%: Likely. The evidence clearly favors this outcome.
+• 55-65%: Lean towards yes, but significant uncertainty remains.
+• 45-55%: True toss-up. Don't pretend you know.
+• Below 40%: Evidence suggests this probably won't happen.
+
+═══ OUTPUT ═══
+Return ONLY valid JSON. No markdown, no backticks, no text outside the JSON:
+{
+  "probability_yes": 0.XX,
+  "confidence": 0.XX,
+  "rationale": "Your step-by-step reasoning in 2-4 sentences. Include: your base rate estimate, how evidence shifted it, and the key factor that determined your final number."
+}`;
+
   const providerOrder = ['openai', 'claude', 'gemini', 'ollama_cloud', 'local_ollama', 'kimi_direct'];
   const rawWeights = { openai: Number(cfg.llm_weight_openai ?? 0.35), claude: Number(cfg.llm_weight_claude ?? 0.25), gemini: Number(cfg.llm_weight_gemini ?? 0.2), ollama_cloud: Number(cfg.llm_weight_ollama_cloud ?? 0.2), local_ollama: Number(cfg.llm_weight_local_ollama ?? 0.15), kimi_direct: Number(cfg.llm_weight_kimi ?? 0.15) };
   const estimates = {};
   const confidences = {};
   const notes = [];
+  const rationales = {};
 
   for (const name of providerOrder) {
     try {
@@ -108,6 +164,7 @@ export async function buildLlmEnsembleEstimate(market, brief = {}, cfg = {}, pro
       if (!out) continue;
       estimates[name] = clamp01(out.probability_yes, Number(market.market_price || 0.5));
       confidences[name] = clamp01(out.confidence, 0.55);
+      if (out.rationale) rationales[name] = String(out.rationale).slice(0, 200);
       // Small delay between providers to avoid rate limits
       if (providerOrder.indexOf(name) < providerOrder.length - 1) await new Promise(r => setTimeout(r, 500));
     } catch (error) {
@@ -119,11 +176,11 @@ export async function buildLlmEnsembleEstimate(market, brief = {}, cfg = {}, pro
   const active = Object.keys(estimates);
   if (!active.length) {
     pushLiveComm('llm_ensemble_empty', { market_id: market.id, market: String(market.question || '').slice(0, 120) });
-    return { estimates: {}, notes: notes.length ? notes : ['no_llm_provider_available'] };
+    return { estimates: {}, notes: notes.length ? notes : ['no_llm_provider_available'], rationales: {} };
   }
   const weightSum = active.reduce((sum, name) => sum + Math.max(0, rawWeights[name] || 0), 0) || 1;
   const weighted = active.reduce((sum, name) => { const w = Math.max(0, rawWeights[name] || 0) / weightSum; const c = confidences[name] || 0.55; return sum + (estimates[name] * w * (0.6 + c * 0.4)); }, 0);
-  return { estimates, notes, model_prob: clamp01(weighted, Number(market.market_price || 0.5)) };
+  return { estimates, notes, rationales, model_prob: clamp01(weighted, Number(market.market_price || 0.5)) };
 }
 
 export async function runPredictStep(state = loadState()) {
@@ -169,7 +226,7 @@ export async function runPredictStep(state = loadState()) {
     const confidence = Number(Math.max(0.05, Math.min(0.99, (1 - Math.min(0.5, stdDev)) * 0.55 + briefConfidence * 0.45)).toFixed(3));
     const actionable = Math.abs(edge) >= minEdge && confidence >= minConfidence;
     const direction = edge > 0 ? 'BUY_YES' : edge < 0 ? 'BUY_NO' : 'NO_TRADE';
-    predictions.push({ time: new Date().toISOString(), market_id: m.id, question: m.question, source: m.platform || 'unknown', market_prob: marketProb, model_prob: Number(modelProb.toFixed(4)), edge, expected_value: expectedValue, mispricing_zscore: deltaZ, ensemble_std_dev: Number(stdDev.toFixed(4)), ensemble_estimates: Object.fromEntries(Object.entries(heuristicEstimates).map(([k, v]) => [k, Number(v.toFixed(4))])), llm_estimates: Object.fromEntries(Object.entries(llmEnsemble.estimates || {}).map(([k, v]) => [k, Number(v.toFixed(4))])), llm_providers_used: llmProvidersUsed, llm_notes: llmEnsemble.notes || [], confidence: Number(confidence.toFixed(3)), actionable, direction: actionable ? direction : 'NO_TRADE' });
+    predictions.push({ time: new Date().toISOString(), market_id: m.id, question: m.question, source: m.platform || 'unknown', market_prob: marketProb, model_prob: Number(modelProb.toFixed(4)), edge, expected_value: expectedValue, mispricing_zscore: deltaZ, ensemble_std_dev: Number(stdDev.toFixed(4)), llm_estimates: Object.fromEntries(Object.entries(llmEnsemble.estimates || {}).map(([k, v]) => [k, Number(v.toFixed(4))])), llm_providers_used: llmProvidersUsed, llm_notes: llmEnsemble.notes || [], llm_rationales: llmEnsemble.rationales || {}, confidence: Number(confidence.toFixed(3)), actionable, direction: actionable ? direction : 'NO_TRADE' });
   }
 
   if (cfg.llm_enabled !== false && cfg.llm_require_provider === true && predictions.some((p) => !(p.llm_providers_used || []).length)) {

@@ -308,6 +308,7 @@ export default function App(){
             <Btn variant={cfg.kill_switch?'danger':'warn'} onClick={()=>act('kill',async()=>{await apiFetch('/api/kill-switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!cfg.kill_switch})});setMsg(cfg.kill_switch?'✅ Kill Switch aus':'⚠️ Kill Switch AN — keine neuen Trades');})}>{cfg.kill_switch?'🔴 Kill AUS':'🛑 Kill Switch'}</Btn>
             <Btn variant="warn" onClick={()=>act('resetM',async()=>{const r=await apiFetch('/api/markets/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:'ui'})});const p=await r.json();if(!p.ok)throw new Error(p.message);setMsg(`✅ ${p.previous_markets} Märkte gelöscht. Scanne neu.`);})} busy={busy.resetM} help="Löscht Märkte, Research, Predictions">🗑 Märkte Reset</Btn>
             <Btn variant="danger" onClick={()=>{if(!confirm('Alle Trades löschen?'))return;act('resetT',async()=>{const r=await apiFetch('/api/trades/reset',{method:'POST'});const p=await r.json();if(!p.ok)throw new Error(p.message);setMsg(`✅ ${p.previous_trades} Trades gelöscht.`);});}} busy={busy.resetT} help="Löscht alle Trades und Orders">🗑 Trades Reset</Btn>
+            <Btn variant="danger" onClick={()=>{if(!confirm('ALLES zurücksetzen? Trades, Predictions, Brier Score, Learning — wirklich NEU starten?'))return;act('resetAll',async()=>{const r=await apiFetch('/api/learning/reset',{method:'POST'});const p=await r.json();if(!p.ok)throw new Error(p.message);setMsg('✅ Komplett-Reset. Bot startet mit frischen Daten.');});}} busy={busy.resetAll} help="Löscht ALLE Daten: Trades, Predictions, Brier, Compound, failure_log. Einstellungen bleiben.">🔄 Komplett-Reset</Btn>
             <Btn onClick={()=>act('diagnose',async()=>{const r=await apiFetch('/api/scan/diagnose');const p=await r.json();setMsg(`Diagnose: PM=${p.polymarket?.raw||0} raw, KA=${p.kalshi?.raw||0} raw → ${p.scanner?.after_ranking||0} nach Filter. ${p.polymarket?.error?'PM-Fehler: '+p.polymarket.error:''} ${p.kalshi?.error?'KA-Fehler: '+p.kalshi.error:''} Filter: Vol≥${p.filters?.min_volume}, Liq≥${p.filters?.min_liquidity}, Kat="${p.filters?.categories}". ${(p.scanner?.filter_reasons||[]).join('. ')}`);},true)} busy={busy.diagnose} help="Zeigt warum der Scanner keine Märkte findet">🔬 Scan Diagnose</Btn>
           </div>
         </Card>
@@ -553,6 +554,7 @@ export default function App(){
               </div>
             </div>
             <div style={{fontSize:10,color:C.dim,marginTop:2}}>💡 {dirExplain(p)}</div>
+            {Object.entries(p.llm_rationales||{}).map(([provider,rationale])=><div key={provider} style={{fontSize:10,color:C.muted,marginTop:1,marginLeft:8}}>🤖 <span style={{color:C.cyan}}>{provider}</span>: {rationale}</div>)}
             {(p.llm_notes||[]).filter(n=>n).map((n,j)=>{const h=helpErr(n);return<div key={j} style={{fontSize:10,color:C.amber,...mono,marginTop:1}}>⚠ {n}{h&&<span style={{color:C.muted}}> → {h}</span>}</div>;})}
           </div>)}
         </Card>}
@@ -697,7 +699,7 @@ export default function App(){
               {key:'llm_retries',label:'LLM Retries bei Timeout',rec:2,desc:'Wie oft bei Timeout nochmal versuchen.',why:'2 = bei Timeout wird nochmal mit doppelter Wartezeit versucht.'},
               {key:'llm_delay_between_markets_ms',label:'Delay zwischen Märkten (ms)',rec:4000,desc:'Wartezeit zwischen LLM-Anfragen pro Markt. Verhindert Rate Limits.',why:'4000ms = max 15 Märkte/Min. Für Gemini Free Tier nötig. Mit bezahltem Tier auf 1000 senken.'},
               {key:'llm_temperature',label:'Temperature',rec:0.1,desc:'0=konsistent, 1=kreativ.',why:'0.1 für stabile Schätzungen.'},
-              {key:'llm_max_tokens',label:'Max Tokens',rec:220,desc:'Max Antwortlänge der KI.',why:'220 reicht für JSON mit Wahrscheinlichkeit + Begründung.'},
+              {key:'llm_max_tokens',label:'Max Tokens',rec:500,desc:'Max Antwortlänge der KI.',why:'500 für vollständige Begründung mit Reasoning. Weniger = kürzere Analyse.'},
               {key:'llm_require_provider',label:'LLM zwingend',rec:false,desc:'Fehler wenn keine KI antwortet (statt Heuristik-Fallback).',why:'AUS lassen — Fallback ist besser als gar kein Signal.',type:'bool'},
               {key:'step3_min_edge',label:'Predict Min Edge',rec:0.04,desc:'Minimum Edge für ein Predict-Signal.',why:'4% = nur handeln wenn deutlicher Vorteil.'},
               {key:'step3_min_confidence',label:'Predict Min Confidence',rec:0.6,desc:'Minimum Confidence für ein Signal (0-1).',why:'0.6 = mäßig sicher. Höher = weniger aber bessere Signale.'},
