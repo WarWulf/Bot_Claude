@@ -6,14 +6,18 @@
 // Quarter Kelly (0.25) = sicherer, konsistentere Ergebnisse.
 //
 // Formel: f* = (p * b - q) / b
-//   p = Gewinnwahrscheinlichkeit (dein Model)
+//   p = Gewinnwahrscheinlichkeit
 //   q = 1 - p (Verlustwahrscheinlichkeit)
-//   b = Netto-Odds = (1 / market_price) - 1
+//   b = Netto-Odds = (1 / contract_price) - 1
+//
+// WICHTIG: Bei BUY_NO muss aus der NO-Perspektive gerechnet werden!
+//   BUY_YES: p = model_prob,     contract_price = market_price
+//   BUY_NO:  p = 1 - model_prob, contract_price = 1 - market_price
 
-export function kellyFraction(probability, marketPrice) {
-  const p = Math.max(0.01, Math.min(0.99, Number(probability)));
+export function kellyFraction(winProb, contractPrice) {
+  const p = Math.max(0.01, Math.min(0.99, Number(winProb)));
   const q = 1.0 - p;
-  const b = marketPrice > 0 && marketPrice < 1 ? (1.0 / marketPrice) - 1.0 : 1.0;
+  const b = contractPrice > 0 && contractPrice < 1 ? (1.0 / contractPrice) - 1.0 : 1.0;
   if (b <= 0) return 0;
   const fullKelly = (p * b - q) / b;
   return Math.max(0, fullKelly);
@@ -27,16 +31,29 @@ export function computePaperPositionUsd(prediction = {}, cfg = {}) {
   const kellyMult = Math.max(0.1, Math.min(1, Number(cfg.kelly_fraction ?? 0.25)));
   const modelProb = Math.max(0.01, Math.min(0.99, Number(prediction.model_prob || prediction.confidence || 0.5)));
   const marketPrice = Math.max(0.01, Math.min(0.99, Number(prediction.market_prob || 0.5)));
+  const direction = String(prediction.direction || '').toUpperCase();
 
-  // Kelly Criterion
-  const fullKelly = kellyFraction(modelProb, marketPrice);
+  // Kelly Criterion — depends on direction!
+  let fullKelly;
+  if (direction === 'BUY_NO') {
+    // BUY_NO: we're betting that the event WON'T happen
+    // Our win probability = 1 - model_prob (chance NO wins)
+    // Contract price = 1 - market_price (price of NO contract)
+    const noWinProb = 1 - modelProb;
+    const noContractPrice = 1 - marketPrice;
+    fullKelly = kellyFraction(noWinProb, noContractPrice);
+  } else {
+    // BUY_YES: we're betting that the event WILL happen
+    fullKelly = kellyFraction(modelProb, marketPrice);
+  }
+
   const fractionalKelly = fullKelly * kellyMult;
 
   // Clamp to max position size
   const positionPct = Math.min(fractionalKelly, maxPosPct);
-  const positionUsd = Number((bankroll * positionPct).toFixed(2));
 
-  // Minimum $1 or skip
+  // Minimum $1 position, otherwise skip
+  const positionUsd = Number((bankroll * positionPct).toFixed(2));
   return positionUsd >= 1 ? positionUsd : 0;
 }
 

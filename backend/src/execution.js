@@ -40,6 +40,7 @@ export async function runExecutionStep(state = loadState()) {
     if (blockedByCorrelation.has(String(p.market_id))) { skipped += 1; correlationBlocked += 1; continue; }
 
     const positionUsd = computePaperPositionUsd(p, state.config || {});
+    if (positionUsd <= 0) { skipped += 1; continue; } // Kelly says no edge worth trading
     const exposureCheck = canOpenPaperPosition({ openExposureUsd, newPositionUsd: positionUsd, cfg: state.config || {} });
     if (!exposureCheck.ok) { skipped += 1; riskBlocked += 1; continue; }
 

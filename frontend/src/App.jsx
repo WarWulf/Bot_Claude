@@ -214,7 +214,27 @@ export default function App(){
         </Card>
 
         {/* Offene Trades */}
-        {openTrades.length>0&&<Card title={`📈 Laufende Trades (${openTrades.length})`} help="Alle aktuell offenen Paper-Trades. Zeigt wann eröffnet, wie lange offen, Restlaufzeit des Marktes, Edge und Einsatz.">
+        {/* Laufende Trades mit Exposure-Übersicht */}
+        {openTrades.length>0&&<Card title={`📈 Laufende Trades (${openTrades.length})`} help="Alle offenen Paper-Trades. Zeigt Einsatz, Edge, Dauer und Restlaufzeit.">
+          {/* Exposure Summary */}
+          <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:10,padding:'8px 10px',background:C.bg,borderRadius:6,border:`1px solid ${C.border}`}}>
+            <div style={{fontSize:11,...mono}}>
+              <span style={{color:C.muted}}>Investiert: </span>
+              <span style={{color:C.cyan,fontWeight:600}}>${fmt(openExposure,0)}</span>
+              <span style={{color:C.muted}}> von ${fmt(bankroll,0)}</span>
+              <span style={{color:C.muted}}> = </span>
+              <span style={{color:bankroll>0&&openExposure/bankroll>0.5?C.amber:C.green,fontWeight:600}}>{bankroll>0?fmt(openExposure/bankroll*100,1):0}%</span>
+            </div>
+            <div style={{fontSize:11,...mono}}>
+              <span style={{color:C.muted}}>Frei: </span>
+              <span style={{color:C.green}}>${fmt(Math.max(0,bankroll-openExposure),0)}</span>
+            </div>
+            <div style={{fontSize:11,...mono}}>
+              <span style={{color:C.muted}}>Max Exposure: </span>
+              <span style={{color:C.dim}}>{fmt(Number(cfg.max_total_exposure_pct||0.5)*100,0)}% = ${fmt(bankroll*Number(cfg.max_total_exposure_pct||0.5),0)}</span>
+            </div>
+          </div>
+          {openTrades.filter(t=>Number(t.positionUsd||0)>0).length===0&&<div style={{color:C.amber,fontSize:11,marginBottom:6,...mono}}>⚠ Alle Trades haben $0 Einsatz — Kelly berechnet keine Position. Prüfe ob Edge zu klein ist.</div>}
           {openTrades.map((t,i)=>{
             const openedAt=new Date(t.time||Date.now());
             const hoursOpen=Math.round((Date.now()-openedAt.getTime())/3600000);
@@ -244,11 +264,12 @@ export default function App(){
                 <span title="Eröffnet am">📅 {openStr}</span>
                 <span title="Wie lange schon offen">⏱ seit {durationStr}</span>
                 {remainStr&&<span title={`Markt endet: ${endDateStr}`} style={{color:remainStr==='abgelaufen'?C.red:Number(remainStr.replace(/\D/g,''))<=3?C.amber:C.muted}}>🏁 noch {remainStr}{endDateStr?` (${endDateStr})`:''}</span>}
-                <span title="Einsatz">💰 ${fmt(t.positionUsd,0)}</span>
-                <span title="Edge bei Eröffnung" style={{color:Number(t.edge||0)>0.05?C.green:C.muted}}>Edge:{fmt(Number(t.edge||0)*100,1)}%</span>
+                <span title="Einsatz — wie viel von deinem Bankroll in diesem Trade steckt" style={{color:Number(t.positionUsd||0)===0?C.red:C.green}}>💰 {Number(t.positionUsd||0)>0?`$${fmt(t.positionUsd,0)}`:'$0 ⚠'}</span>
+                <span title={`Edge = Vorteil des Bots vs. Markt. ${Number(t.edge||0)>0?'Positiv = Bot denkt Event ist wahrscheinlicher als Markt':'Negativ = Bot denkt Event ist unwahrscheinlicher als Markt'}`} style={{color:Math.abs(Number(t.edge||0))>0.05?C.green:C.muted}}>Edge:{fmt(Number(t.edge||0)*100,1)}%</span>
                 {t.category&&t.category!=='other'&&<span style={{fontSize:9,padding:'1px 4px',borderRadius:3,background:`${C.amber}15`,color:C.amber}}>{t.category}</span>}
                 <span style={{fontSize:9,padding:'1px 4px',borderRadius:3,background:t.platform==='kalshi'?`${C.purple}20`:`${C.cyan}20`,color:t.platform==='kalshi'?C.purple:C.cyan}}>{t.platform||t.source}</span>
               </div>
+              {Number(t.positionUsd||0)===0&&<div style={{fontSize:9,color:C.red,marginTop:2,...mono}}>⚠ $0 Einsatz: Kelly-Formel sieht keinen Vorteil. Edge zu klein oder Confidence zu niedrig.</div>}
             </div>;})}
         </Card>}
         {!openTrades.length&&trades.length===0&&<Card help="Noch keine Trades. Starte die Full Pipeline oben."><div style={{color:C.muted,fontSize:12,textAlign:'center',padding:8}}>Noch keine Trades. Starte die Pipeline.</div></Card>}
