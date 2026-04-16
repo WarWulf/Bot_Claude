@@ -222,6 +222,70 @@ app.post('/api/step1/finalize', async (_, res) => {
 app.post('/api/markets/reset', (req, res) => { const s = loadState(); const prev = s.markets.length; s.markets = []; s.scan_results = []; s.scan_runs = []; s.scan_history = {}; s.research_briefs = []; s.predictions = []; logLine(s, 'warning', 'markets reset'); saveState(s); res.json({ ok: true, previous_markets: prev }); });
 app.post('/api/trades/reset', (req, res) => { const s = loadState(); const prev = (s.trades||[]).length; s.trades = []; s.signals = []; s.orders = []; s.execution_runs = []; s.risk = { peak_bankroll: Number(s.config?.bankroll||1000), drawdown_pct: 0, daily_realized_pnl: 0, open_exposure_usd: 0, open_positions: 0, level: 'OK' }; s.step4_summary = { completed_at: null, candidate_signals:0, executed_orders:0, skipped_orders:0, opened_trades:0, risk_blocked_orders:0, paper_mode: true }; s.compound_summary = null; s.risk_runs = []; logLine(s, 'warning', `trades reset (${prev} deleted, risk+drawdown reset)`); saveState(s); res.json({ ok: true, previous_trades: prev }); });
 
+// Export bot performance data for external analysis
+app.get('/api/export/performance', (_, res) => {
+  const s = loadState();
+  const exportData = {
+    exported_at: new Date().toISOString(),
+    strategy_version: s.config?.strategy_version || 1,
+    bot_runtime_days: s.scan_runs?.length ? Math.ceil((Date.now() - new Date(s.scan_runs[s.scan_runs.length-1].time).getTime()) / 86400000) : 0,
+    // Core metrics
+    bankroll: { starting: s.config?.starting_bankroll || 1000, current: (s.config?.bankroll || 0) + (s.trades || []).filter(t=>t.status!=='OPEN').reduce((sum,t)=>sum+Number(t.netPnlUsd||0),0), configured: s.config?.bankroll || 0 },
+    performance: {
+      total_trades: (s.trades || []).length,
+      open_trades: (s.trades || []).filter(t => t.status === 'OPEN').length,
+      closed_trades: (s.trades || []).filter(t => t.status !== 'OPEN').length,
+      winning_trades: (s.trades || []).filter(t => Number(t.netPnlUsd || 0) > 0).length,
+      losing_trades: (s.trades || []).filter(t => Number(t.netPnlUsd || 0) < 0).length,
+      total_pnl: (s.trades || []).reduce((sum, t) => sum + Number(t.netPnlUsd || 0), 0),
+      win_rate: s.compound_summary?.win_rate_pct,
+      profit_factor: s.compound_summary?.profitFactor,
+      sharpe_ratio: s.compound_summary?.sharpe_ratio,
+      brier_score: s.brier_score,
+      brier_samples: s.brier_samples,
+      max_drawdown_pct: s.risk?.drawdown_pct,
+    },
+    // All trades with full context for analysis
+    trades: (s.trades || []).map(t => ({
+      id: t.id, time: t.time, question: t.title, direction: t.direction, status: t.status,
+      edge: t.edge, confidence: t.confidence, model_prob: t.model_prob, market_prob: t.market_prob,
+      positionUsd: t.positionUsd, netPnlUsd: t.netPnlUsd,
+      platform: t.platform || t.source, category: t.category,
+      days_to_expiry: t.days_to_expiry, end_date: t.end_date,
+    })),
+    // All predictions for calibration analysis
+    predictions: (s.predictions || []).slice(0, 500).map(p => ({
+      time: p.time, question: p.question, market_prob: p.market_prob, model_prob: p.model_prob,
+      edge: p.edge, confidence: p.confidence, actionable: p.actionable, direction: p.direction,
+      llm_providers_used: p.llm_providers_used, llm_estimates: p.llm_estimates,
+      llm_rationales: p.llm_rationales,
+    })),
+    // Research briefs
+    research_briefs_sample: (s.research_briefs || []).slice(0, 50).map(b => ({
+      market_id: b.market_id, question: b.question, sentiment: b.sentiment, confidence: b.confidence,
+      stance: b.stance, source_count: (b.sources || []).length,
+      sources_sample: (b.sources || []).slice(0, 3).map(s => ({ title: s.title?.slice(0, 100), source_type: s.source_type, domain: s.domain })),
+    })),
+    // Configuration
+    config: {
+      kelly_fraction: s.config?.kelly_fraction, min_edge: s.config?.min_edge,
+      max_pos_pct: s.config?.max_pos_pct, max_total_exposure_pct: s.config?.max_total_exposure_pct,
+      top_n: s.config?.top_n, scanner_min_volume: s.config?.scanner_min_volume,
+      research_min_keyword_overlap: s.config?.research_min_keyword_overlap,
+      llm_weights: {
+        openai: s.config?.llm_weight_openai, claude: s.config?.llm_weight_claude,
+        gemini: s.config?.llm_weight_gemini, ollama_cloud: s.config?.llm_weight_ollama_cloud,
+      },
+    },
+    // Compound summary + nightly reviews
+    compound_summary: s.compound_summary,
+    nightly_reviews: (s.nightly_reviews || []).slice(0, 14),
+  };
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', `attachment; filename="bot-performance-${new Date().toISOString().slice(0,10)}.json"`);
+  res.json(exportData);
+});
+
 // Full learning data reset — clears everything the bot has "learned" so it starts fresh
 app.post('/api/learning/reset', (req, res) => {
   const s = loadState();

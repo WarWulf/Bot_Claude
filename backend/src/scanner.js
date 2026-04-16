@@ -183,13 +183,14 @@ export function enrichMarketsWithHistory(state, markets, cfg) {
 
 export function upsertScannedMarkets(state, incoming, sourceLabel, minPrice, maxPrice) {
   let added = 0;
+  const nowIso = new Date().toISOString();
   const existing = new Map(state.markets.map((m) => [`${m.platform}|${m.question}|${m.outcome}`, m]));
   for (const item of incoming) {
     const price = Number(item.market_price || 0);
     if (price < minPrice || price > maxPrice) continue;
     const key = `${item.platform}|${item.question}|${item.outcome}`;
-    if (existing.has(key)) Object.assign(existing.get(key), item, { source: sourceLabel });
-    else { state.markets.push({ id: nextId(state.markets), ...item, source: sourceLabel }); added += 1; }
+    if (existing.has(key)) Object.assign(existing.get(key), item, { source: sourceLabel, last_seen: nowIso });
+    else { state.markets.push({ id: nextId(state.markets), ...item, source: sourceLabel, last_seen: nowIso }); added += 1; }
   }
   return added;
 }
@@ -234,15 +235,33 @@ export async function runScanCycle({ persist = true, force = false } = {}) {
     logLine(state, 'error', `scan fetch error: ${e.message}`);
   }
 
-  // Purge expired markets from DB
+  // Aggressive DB cleanup: expired, closed, stale (not seen in 2 scans), and very old markets
   const beforePurge = state.markets.length;
+  const now = Date.now();
+  const staleAfterMs = 4 * 60 * 60 * 1000; // 4 hours = consider market stale if not refreshed
+
   state.markets = (state.markets || []).filter(m => {
-    if (m.end_date) { const endMs = new Date(m.end_date).getTime(); if (endMs < Date.now()) return false; }
+    // Remove expired markets
+    if (m.end_date) { const endMs = new Date(m.end_date).getTime(); if (endMs < now) return false; }
     if (Number(m.days_to_expiry) <= 0) return false;
+    // Remove closed/resolved markets
+    const status = String(m.status || '').toLowerCase();
+    if (['closed', 'resolved', 'settled', 'finalized'].includes(status)) return false;
+    // Remove stale markets (not seen in last 4 hours = probably delisted)
+    if (m.last_seen) { const lastMs = new Date(m.last_seen).getTime(); if ((now - lastMs) > staleAfterMs) return false; }
+    // Remove markets with no volume AND no liquidity (dead markets)
+    if (Number(m.volume || 0) === 0 && Number(m.liquidity || 0) === 0) return false;
     return true;
   });
   const purged = beforePurge - state.markets.length;
-  if (purged > 0) logLine(state, 'info', `scan: purged ${purged} expired markets from DB`);
+  if (purged > 0) logLine(state, 'info', `scan: purged ${purged} stale/expired/closed markets from DB (${beforePurge} → ${state.markets.length})`);
+
+  // Hard cap: never more than 5000 markets in DB (keep newest)
+  if (state.markets.length > 5000) {
+    state.markets.sort((a, b) => new Date(b.last_seen || 0).getTime() - new Date(a.last_seen || 0).getTime());
+    state.markets = state.markets.slice(0, 5000);
+    logLine(state, 'warning', `scan: DB capped at 5000 markets (dropped oldest)`);
+  }
 
   state.markets = enrichMarketsWithHistory(state, state.markets || [], cfg);
   const ranked = scanAndRankMarkets(state.markets || [], cfg);
