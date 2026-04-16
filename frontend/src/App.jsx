@@ -164,9 +164,6 @@ function ForexTradeList({apiFetch,C,mono,fmt}){
     </div>
   </div>)}</div>;
 }
-  if(p.direction==='BUY_YES')return`Bot: ${(mdl*100).toFixed(0)}% vs Markt: ${(m*100).toFixed(0)}% → Vorteil +${(e*100).toFixed(1)}%. Markt unterbewertet → YES kaufen.`;
-  if(p.direction==='BUY_NO')return`Bot: ${(mdl*100).toFixed(0)}% vs Markt: ${(m*100).toFixed(0)}% → Markt zu hoch → NO kaufen.`;
-  return`Unterschied zu klein oder Confidence zu niedrig.`;}
 
 function Card({title,help,children,accent}){return<div style={{background:C.card,border:`1px solid ${accent||C.border}`,borderRadius:10,padding:'14px 16px',marginBottom:14}}>{title&&<div style={{fontSize:14,fontWeight:600,marginBottom:help?4:10}}>{title}</div>}{help&&<div style={{fontSize:12,color:C.muted,marginBottom:10,lineHeight:1.5}}>{help}</div>}{children}</div>;}
 function Metric({label,value,unit='',target,good,help}){return<div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:'10px 12px',flex:'1 1 120px',minWidth:120}} title={help||''}><div style={{fontSize:10,color:C.muted,textTransform:'uppercase',letterSpacing:1,...mono}}>{label}</div><div style={{fontSize:18,fontWeight:700,color:(good!==undefined?good:true)?C.green:C.red,marginTop:2,...mono}}>{value}{unit}</div>{target&&<div style={{fontSize:9,color:C.dim,...mono}}>Ziel: {target}</div>}</div>;}
