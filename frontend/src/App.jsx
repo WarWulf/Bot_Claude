@@ -8,6 +8,162 @@ const mono={fontFamily:'JetBrains Mono,monospace'};
 const ERR_HELP={'aborted':'LLM-Provider zu langsam. Erhöhe LLM Timeout (z.B. 30000ms).','http 401':'API-Key ungültig oder fehlt.','http 403':'Zugriff blockiert. Reddit blockiert manchmal Bot-Zugriffe — kein Problem, andere Quellen liefern trotzdem.','http 429':'Rate Limit! Erhöhe "Delay zwischen Märkten" oder reduziere "Top N".','http 500':'Server-Fehler beim Provider.','ECONNREFUSED':'URL falsch oder Server nicht erreichbar.','fetch failed':'Netzwerk-Fehler. Einige Quellen sind vom VPS aus nicht erreichbar — normal.','no_llm_provider':'Kein LLM konfiguriert.','llm_disabled':'LLM deaktiviert — Heuristik wird benutzt.'};
 function helpErr(msg){const s=String(msg||'').toLowerCase();for(const[k,v]of Object.entries(ERR_HELP))if(s.includes(k.toLowerCase()))return v;return null;}
 function dirExplain(p){if(!p)return'';const e=Number(p.edge||0),m=Number(p.market_prob||0),mdl=Number(p.model_prob||0);
+  if(p.direction==='BUY_YES')return`Bot sagt ${(mdl*100).toFixed(0)}% (Markt: ${(m*100).toFixed(0)}%). Edge +${(e*100).toFixed(1)}% → Kaufe YES weil Bot den Event für wahrscheinlicher hält als der Markt.`;
+  if(p.direction==='BUY_NO')return`Bot sagt ${(mdl*100).toFixed(0)}% (Markt: ${(m*100).toFixed(0)}%). Edge ${(e*100).toFixed(1)}% → Kaufe NO weil Bot den Event für unwahrscheinlicher hält.`;
+  return`Kein Trade. Edge ${(e*100).toFixed(1)}% ist zu klein (min ${Number(p.min_edge||0.04)*100}%).`;}
+
+// ═══ FOREX DASHBOARD COMPONENT ═══
+function ForexDashboard({cfg,apiFetch,act,busy,setMsg,forexSignals,setForexSignals,C,mono,fmt,Btn,Card,Metric}){
+  const [stats,setStats]=React.useState(null);
+  const [trades,setTrades]=React.useState([]);
+  const [dur,setDur]=React.useState(Number(cfg.forex_default_duration||3));
+  const [amt,setAmt]=React.useState(Number(cfg.forex_default_amount||5));
+  const refresh=React.useCallback(async()=>{try{const r=await apiFetch('/api/forex/stats');setStats(r);setTrades(r?.open||[]);}catch{}},[apiFetch]);
+  React.useEffect(()=>{refresh();const t=setInterval(refresh,5000);return()=>clearInterval(t);},[refresh]);
+  const doTrade=async(symbol,direction)=>{
+    const r=await apiFetch('/api/forex/trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol,direction,duration_min:dur,amount:amt})});
+    const p=await r.json();if(!p.ok)throw new Error(p.error);
+    setMsg(`✅ ${direction} ${symbol} — $${amt} für ${dur} Min. Einstieg: ${p.trade.entry_price}`);refresh();
+  };
+
+  const bankroll=stats?.bankroll??Number(cfg.forex_bankroll||100);
+  const startBankroll=stats?.starting_bankroll??Number(cfg.forex_bankroll||100);
+  const pnl=stats?.total_pnl||0;
+
+  return<>
+    {/* Bankroll & Stats */}
+    <Card title="💰 Forex Paper Trading" help={`Eigene Bankroll für Forex/Binary Options — unabhängig vom Prediction Market Bot. Auszahlung bei Gewinn: ${cfg.forex_payout_pct||85}%. Break-even Win Rate: 54%.`}>
+      <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:10}}>
+        <Metric label="Bankroll" value={`$${fmt(bankroll,2)}`} good={pnl>=0} help="Dein Forex-Kapital (getrennt vom PM-Bot)"/>
+        <Metric label="P&L" value={`${pnl>=0?'+':''}$${fmt(pnl,2)}`} good={pnl>=0}/>
+        <Metric label="Win Rate" value={`${stats?.win_rate||0}%`} target="≥54%" good={Number(stats?.win_rate||0)>=54} help="Über 54% = profitabel bei 85% Auszahlung"/>
+        <Metric label="Trades" value={`${stats?.wins||0}W / ${stats?.losses||0}L`} help="Gewonnen / Verloren"/>
+        <Metric label="Offen" value={`${stats?.open_trades||0} / max ${cfg.forex_max_concurrent||2}`}/>
+      </div>
+
+      {/* Trade Controls */}
+      <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginBottom:10,padding:'8px 10px',background:C.bg,borderRadius:6,border:`1px solid ${C.border}`}}>
+        <div style={{fontSize:11,...mono}}>
+          <span style={{color:C.muted}}>Einsatz: </span>
+          <select value={amt} onChange={e=>setAmt(Number(e.target.value))} style={{background:C.card,color:C.text,border:`1px solid ${C.border}`,borderRadius:4,padding:'2px 6px',fontSize:11,...mono}}>
+            {[1,2,3,5,10,15,20,25,50].map(v=><option key={v} value={v}>${v}</option>)}
+          </select>
+        </div>
+        <div style={{fontSize:11,...mono}}>
+          <span style={{color:C.muted}}>Dauer: </span>
+          <select value={dur} onChange={e=>setDur(Number(e.target.value))} style={{background:C.card,color:C.text,border:`1px solid ${C.border}`,borderRadius:4,padding:'2px 6px',fontSize:11,...mono}}>
+            {[1,2,3,5,10,15].map(v=><option key={v} value={v}>{v} Min</option>)}
+          </select>
+        </div>
+        <Btn variant="warn" onClick={()=>{if(!confirm('Forex-Daten zurücksetzen?'))return;act('fxReset',async()=>{await apiFetch('/api/forex/reset',{method:'POST'});setMsg('✅ Forex Reset — Bankroll zurückgesetzt');refresh();});}} busy={busy.fxReset} style={{fontSize:10}}>🔄 Reset</Btn>
+      </div>
+
+      {/* Open Trades with Countdown */}
+      {(stats?.open||[]).length>0&&<div style={{marginBottom:10}}>
+        <div style={{fontSize:12,fontWeight:600,color:C.text,marginBottom:4}}>⏱ Laufende Trades</div>
+        {(stats.open).map((t,i)=><div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 8px',marginBottom:4,borderRadius:6,background:t.direction==='CALL'?`${C.green}08`:`${C.red}08`,border:`1px solid ${t.direction==='CALL'?C.green:C.red}33`}}>
+          <div>
+            <span style={{fontWeight:600,fontSize:12}}>{t.symbol}</span>
+            <span style={{fontSize:11,...mono,color:t.direction==='CALL'?C.green:C.red,marginLeft:6}}>{t.direction==='CALL'?'📈 CALL (Preis steigt)':'📉 PUT (Preis fällt)'}</span>
+          </div>
+          <div style={{textAlign:'right',fontSize:10,...mono}}>
+            <div style={{color:C.cyan}}>💰 ${t.amount} — Einstieg: {t.entry_price?.toFixed(5)}</div>
+            <div style={{color:t.remaining_sec<=10?C.red:C.amber}}>⏱ noch {t.remaining_sec}s</div>
+          </div>
+        </div>)}
+      </div>}
+    </Card>
+
+    {/* Scan + Signal Cards */}
+    <Card title="🔍 Signale scannen" help="Scanne Währungspaare nach technischen Signalen. Klicke auf 📈 CALL oder 📉 PUT um einen Paper Trade zu eröffnen.">
+      <div style={{display:'flex',gap:6,marginBottom:10,flexWrap:'wrap'}}>
+        <Btn onClick={()=>act('forexScan',async()=>{const r=await apiFetch('/api/forex/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({interval:cfg.forex_interval||'5min'})});const p=await r.json();if(!p.ok)throw new Error(p.error||'Scan failed');setForexSignals(p.signals||[]);setMsg(`✅ ${p.signals.length} Paare — ${p.signals.filter(s=>s.direction!=='WAIT').length} Signale`);})} busy={busy.forexScan}>🔍 Scan ({cfg.forex_interval||'5min'})</Btn>
+        {['1min','5min','15min','1h'].map(iv=><Btn key={iv} onClick={()=>act('fxIv'+iv,async()=>{const r=await apiFetch('/api/forex/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({interval:iv})});const p=await r.json();if(!p.ok)throw new Error(p.error);setForexSignals(p.signals||[]);setMsg(`✅ ${iv}: ${p.signals.filter(s=>s.direction!=='WAIT').length} Signale`);})} busy={busy['fxIv'+iv]} style={{fontSize:10,padding:'3px 8px'}}>{iv}</Btn>)}
+      </div>
+
+      {forexSignals.map((sig,i)=>{
+        const dirColor=sig.direction==='CALL'?C.green:sig.direction==='PUT'?C.red:C.muted;
+        const strengthEmoji=sig.signal_strength==='STRONG'?'🟢':sig.signal_strength==='MEDIUM'?'🟡':sig.signal_strength==='WEAK'?'🟠':'⚪';
+        return <div key={i} style={{marginBottom:10,padding:'10px 12px',borderRadius:8,border:`1px solid ${sig.direction!=='WAIT'?dirColor+'44':C.border}`,background:sig.direction!=='WAIT'?dirColor+'08':'transparent'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
+            <div>
+              <span style={{fontSize:14,fontWeight:600}}>{sig.symbol}</span>
+              <span style={{fontSize:11,...mono,color:C.muted,marginLeft:8}}>{sig.current_price?.toFixed(5)}</span>
+              <span style={{fontSize:10,marginLeft:6,color:sig.price_change_pct>0?C.green:sig.price_change_pct<0?C.red:C.muted}}>{sig.price_change_pct>0?'+':''}{sig.price_change_pct?.toFixed(3)}%</span>
+            </div>
+            <div style={{display:'flex',alignItems:'center',gap:4}}>
+              {strengthEmoji}
+              <span style={{fontSize:13,fontWeight:700,color:dirColor,...mono}}>{sig.direction==='CALL'?'↑ CALL':sig.direction==='PUT'?'↓ PUT':'— WAIT'}</span>
+              <span style={{fontSize:10,...mono,color:C.muted}}>({(sig.confidence*100).toFixed(0)}%)</span>
+            </div>
+          </div>
+
+          {sig.error&&<div style={{color:C.red,fontSize:11,...mono}}>❌ {sig.error}</div>}
+
+          {!sig.error&&<>
+            <div style={{display:'flex',flexWrap:'wrap',gap:4,marginBottom:4}}>
+              {Object.entries(sig.indicators||{}).map(([name,ind])=>{
+                const sc=ind.score>0.3?C.green:ind.score<-0.3?C.red:C.muted;
+                return <div key={name} style={{fontSize:9,padding:'2px 6px',borderRadius:5,background:`${sc}12`,color:sc,...mono}}>{name.toUpperCase()}:{ind.score>0?'+':''}{ind.score.toFixed(1)}</div>;
+              })}
+            </div>
+            <div style={{fontSize:10,color:C.muted,...mono}}>
+              {Object.entries(sig.indicators||{}).map(([name,ind])=><div key={name} style={{marginBottom:1}}>
+                <span style={{color:ind.score>0.3?C.green:ind.score<-0.3?C.red:C.dim}}>{ind.score>0?'▲':ind.score<0?'▼':'─'}</span> {ind.reason}
+              </div>)}
+            </div>
+            {(sig.patterns||[]).length>0&&<div style={{marginTop:3,fontSize:10,...mono}}>
+              {sig.patterns.map((p,j)=><span key={j} style={{color:p.signal==='bullish'?C.green:p.signal==='bearish'?C.red:C.amber,marginRight:8}}>🕯️ {p.name}</span>)}
+            </div>}
+
+            {/* TRADE BUTTONS */}
+            <div style={{display:'flex',gap:6,marginTop:8}}>
+              <Btn onClick={()=>act('fxCall'+i,async()=>{await doTrade(sig.symbol,'CALL');refresh();})} busy={busy['fxCall'+i]} style={{background:`${C.green}22`,color:C.green,border:`1px solid ${C.green}44`}}>📈 CALL ${amt} für {dur}min</Btn>
+              <Btn onClick={()=>act('fxPut'+i,async()=>{await doTrade(sig.symbol,'PUT');refresh();})} busy={busy['fxPut'+i]} style={{background:`${C.red}22`,color:C.red,border:`1px solid ${C.red}44`}}>📉 PUT ${amt} für {dur}min</Btn>
+            </div>
+          </>}
+        </div>;
+      })}
+
+      {!forexSignals.length&&<div style={{color:C.muted,fontSize:12,padding:10,textAlign:'center'}}>
+        Klicke "🔍 Scan" oben für Signale.<br/>
+        <span style={{fontSize:10}}>API-Key: <a href="https://twelvedata.com" target="_blank" style={{color:C.cyan}}>twelvedata.com</a> (kostenlos, 800 Req/Tag)</span>
+      </div>}
+    </Card>
+
+    {/* Trade History */}
+    <Card title={`📋 Trade-Historie (${stats?.total_trades||0})`} help="Alle abgeschlossenen Paper Trades.">
+      {(stats?.total_trades||0)>0&&<div style={{display:'flex',gap:8,marginBottom:8,flexWrap:'wrap'}}>
+        <div style={{fontSize:11,...mono,color:pnl>=0?C.green:C.red}}>P&L: {pnl>=0?'+':''}${fmt(pnl,2)} ({stats?.pnl_pct||0}%)</div>
+        <div style={{fontSize:11,...mono,color:Number(stats?.win_rate||0)>=54?C.green:C.red}}>Win Rate: {stats?.win_rate||0}% (Break-even: 54%)</div>
+      </div>}
+      <ForexTradeList apiFetch={apiFetch} C={C} mono={mono} fmt={fmt}/>
+    </Card>
+
+    {/* Warning */}
+    <div style={{padding:'8px 12px',borderRadius:6,background:`${C.red}08`,border:`1px solid ${C.red}22`,fontSize:10,color:C.amber}}>
+      ⚠️ <strong>Paper Trading Modus.</strong> Kein echtes Geld. Dies simuliert Binary Options Trades mit {cfg.forex_payout_pct||85}% Auszahlung. Bei echtem Trading brauchst du {'>'}54% Win Rate nur für break-even. Beobachte 100+ Trades bevor du echtes Geld riskierst.
+    </div>
+  </>;
+}
+
+function ForexTradeList({apiFetch,C,mono,fmt}){
+  const [trades,setTrades]=React.useState([]);
+  React.useEffect(()=>{(async()=>{try{const r=await apiFetch('/api/forex/trades');setTrades(r?.trades||[]);}catch{}})();},[apiFetch]);
+  const closed=trades.filter(t=>t.status==='CLOSED').slice(0,30);
+  if(!closed.length)return<div style={{color:C.muted,fontSize:11,padding:6}}>Noch keine abgeschlossenen Trades.</div>;
+  return<div style={{maxHeight:300,overflow:'auto'}}>{closed.map((t,i)=><div key={i} style={{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:`1px solid ${C.border}11`,fontSize:10,...mono}}>
+    <div>
+      <span style={{color:t.direction==='CALL'?C.green:C.red}}>{t.direction==='CALL'?'📈':'📉'} {t.direction}</span>
+      <span style={{color:C.text,marginLeft:6}}>{t.symbol}</span>
+      <span style={{color:C.dim,marginLeft:6}}>{t.duration_min}min</span>
+    </div>
+    <div style={{display:'flex',gap:8}}>
+      <span style={{color:C.dim}}>{t.entry_price?.toFixed(5)}→{t.exit_price?.toFixed(5)}</span>
+      <span style={{color:t.result==='WIN'?C.green:C.red,fontWeight:600}}>{t.result==='WIN'?`+$${fmt(t.pnl,2)}`:`-$${fmt(Math.abs(t.pnl),2)}`}</span>
+    </div>
+  </div>)}</div>;
+}
   if(p.direction==='BUY_YES')return`Bot: ${(mdl*100).toFixed(0)}% vs Markt: ${(m*100).toFixed(0)}% → Vorteil +${(e*100).toFixed(1)}%. Markt unterbewertet → YES kaufen.`;
   if(p.direction==='BUY_NO')return`Bot: ${(mdl*100).toFixed(0)}% vs Markt: ${(m*100).toFixed(0)}% → Markt zu hoch → NO kaufen.`;
   return`Unterschied zu klein oder Confidence zu niedrig.`;}
@@ -35,8 +191,8 @@ function SettingRow({item,value,onChange}){
   </div>;
 }
 
-const TABS=['pipeline','maerkte','ergebnisse','risk','settings','log'];
-const TL={pipeline:'🚀 Pipeline',maerkte:'🏪 Märkte',ergebnisse:'📊 Ergebnisse',risk:'🛡️ Risk',settings:'⚙️ Einstellungen',log:'📋 Log'};
+const TABS=['pipeline','maerkte','ergebnisse','risk','forex','settings','log'];
+const TL={pipeline:'🚀 Pipeline',maerkte:'🏪 Märkte',ergebnisse:'📊 Ergebnisse',risk:'🛡️ Risk',forex:'📈 Forex',settings:'⚙️ Einstellungen',log:'📋 Log'};
 
 export default function App(){
   const [tab,setTab]=useState('pipeline');
@@ -66,6 +222,7 @@ export default function App(){
   const [sourceTest,setSourceTest]=useState(null);
   const [llmTest,setLlmTest]=useState(null);
   const [allMarkets,setAllMarkets]=useState([]);
+  const [forexSignals,setForexSignals]=useState([]);
 
   const apiFetch=useCallback(async(path,opts={})=>{const h={...(opts.headers||{})};if(uiPw)h['x-ui-password']=uiPw;return fetch(path,{...opts,headers:h});},[uiPw]);
   const apiJson=useCallback(async(path,fb=null)=>{try{const r=await apiFetch(path);if(!r.ok)throw 0;return await r.json();}catch{return fb;}},[apiFetch]);
@@ -626,6 +783,31 @@ export default function App(){
       </div>}
 
       {/* ═══════════════════════════════════════════ */}
+      {/* TAB: FOREX SIGNALS                          */}
+      {/* ═══════════════════════════════════════════ */}
+      {tab==='forex'&&<div>
+        {/* CALL/PUT Erklärung */}
+        <Card title="Was bedeutet CALL und PUT?" help="Grundlagen für Binary Options / Forex Trading.">
+          <div style={{fontSize:11,lineHeight:1.6}}>
+            <div style={{display:'flex',gap:12,marginBottom:6}}>
+              <div style={{flex:1,padding:'8px 10px',borderRadius:6,background:`${C.green}08`,border:`1px solid ${C.green}33`}}>
+                <div style={{fontWeight:700,color:C.green,fontSize:13}}>📈 CALL = Preis steigt</div>
+                <div style={{color:C.muted,fontSize:10}}>Du wettest dass der Kurs in der gewählten Zeit (z.B. 3 Minuten) HÖHER ist als beim Einstieg. Gewinnst du → bekommst du deinen Einsatz + 85% zurück. Verlierst du → Einsatz weg.</div>
+              </div>
+              <div style={{flex:1,padding:'8px 10px',borderRadius:6,background:`${C.red}08`,border:`1px solid ${C.red}33`}}>
+                <div style={{fontWeight:700,color:C.red,fontSize:13}}>📉 PUT = Preis fällt</div>
+                <div style={{color:C.muted,fontSize:10}}>Du wettest dass der Kurs in der gewählten Zeit TIEFER ist als beim Einstieg. Gleiche Auszahlung wie CALL — nur die Richtung ist umgekehrt.</div>
+              </div>
+            </div>
+            <div style={{fontSize:10,color:C.dim}}>Beispiel: EUR/USD steht bei 1.08500. Du setzt $5 auf CALL für 3 Minuten. Nach 3 Min steht der Kurs bei 1.08520 → du gewinnst $5 × 85% = $4.25 Gewinn. Steht er bei 1.08480 → $5 Verlust.</div>
+          </div>
+        </Card>
+
+        {/* Forex Bankroll */}
+        <ForexDashboard cfg={cfg} apiFetch={apiFetch} act={act} busy={busy} setMsg={setMsg} forexSignals={forexSignals} setForexSignals={setForexSignals} C={C} mono={mono} fmt={fmt} Btn={Btn} Card={Card} Metric={Metric}/>
+      </div>}
+
+      {/* ═══════════════════════════════════════════ */}
       {/* TAB: EINSTELLUNGEN                          */}
       {/* ═══════════════════════════════════════════ */}
       {tab==='settings'&&<div>
@@ -740,6 +922,19 @@ export default function App(){
               <input placeholder="Key Secret" type="password" value={state?.providers?.kalshi?.key_secret||''} onChange={e=>setProvider('kalshi','key_secret',e.target.value)} style={{display:'block',width:'100%',padding:'4px 7px',borderRadius:4,border:`1px solid ${C.border}`,background:C.bg,color:C.text,fontSize:11,...mono,boxSizing:'border-box'}}/></div>
             <div style={{marginTop:8}}><Btn onClick={()=>act('connTest',async()=>{const r=await apiFetch('/api/connection/test');const p=await r.json();setConnTest(p);setMsg(p.ok?'✅ Verbindung OK':'❌ Keine Börse erreichbar');})} busy={busy.connTest}>🔌 Testen</Btn></div>
             {connTest&&<div style={{fontSize:10,...mono,marginTop:4,color:C.muted}}>PM: {connTest.polymarket?.reachable?'✅':'❌'} · Kalshi: {connTest.kalshi?.reachable?'✅':'❌'}</div>}
+          </Card>
+          {/* Forex */}
+          <Card title="📈 Forex / Binary Options" help="Einstellungen für technische Analyse und Paper Trading.">
+            {[{key:'forex_api_key',label:'Forex API Key',rec:'',desc:'API-Key für Kursdaten.',why:'Kostenlos bei twelvedata.com (800 Req/Tag).',type:'text'},
+              {key:'forex_data_provider',label:'Daten-Provider',rec:'twelvedata',desc:'twelvedata oder alphavantage.',why:'TwelveData hat mehr kostenlose Requests.'},
+              {key:'forex_pairs',label:'Währungspaare',rec:'EUR/USD,GBP/USD,USD/JPY,AUD/USD',desc:'Komma-getrennte Paare.',why:'Majors haben den engsten Spread.',type:'text'},
+              {key:'forex_interval',label:'Kerzen-Intervall',rec:'5min',desc:'1min, 5min, 15min, 30min, 1h.',why:'5min ist guter Kompromiss.'},
+              {key:'forex_bankroll',label:'Forex Bankroll ($)',rec:100,desc:'Startkapital für Forex Paper Trading (getrennt vom PM-Bot).',why:'Starte mit $100 zum Testen.'},
+              {key:'forex_payout_pct',label:'Auszahlung (%)',rec:85,desc:'Gewinn-Prozent bei richtigem Trade.',why:'PocketOption zahlt ca. 85%. Andere Broker variieren.'},
+              {key:'forex_max_concurrent',label:'Max gleichzeitige Trades',rec:2,desc:'Wie viele Trades gleichzeitig offen sein dürfen.',why:'2 begrenzt das Risiko. Mehr = aggressiver.'},
+              {key:'forex_default_amount',label:'Standard-Einsatz ($)',rec:5,desc:'Voreingestellter Einsatz pro Trade.',why:'$5 bei $100 Bankroll = 5% pro Trade.'},
+              {key:'forex_default_duration',label:'Standard-Dauer (Min)',rec:3,desc:'Voreingestellte Laufzeit in Minuten.',why:'3 Min ist ein guter Kompromiss.'},
+            ].map(({key,label,rec,desc,why,type})=><SettingRow key={key} k={key} label={label} rec={rec} desc={desc} why={why} type={type||'number'} value={cfg[key]} onChange={v=>setCfg(c=>({...c,[key]:v}))}/>)}
           </Card>
           {/* System */}
           <Card title="🔧 System" help="Logging und sonstige Einstellungen.">

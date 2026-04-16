@@ -30,6 +30,19 @@ import { loadSkillProfiles } from './stepRegistry.js';
 import { liveCommLog } from './utils.js';
 import { computeBrierCalibration } from './utils.js';
 import { registerAuthRoutes } from './auth.js';
+import { scanForexSignals, FOREX_PAIRS, openForexPaperTrade, resolveForexTrades, getForexStats, fetchCandleData } from './forexSignals.js';
+
+// Auto-resolve forex trades every 10 seconds
+setInterval(async () => {
+  try {
+    const s = loadState();
+    const openCount = (s.forex_trades || []).filter(t => t.status === 'OPEN').length;
+    if (openCount > 0) {
+      const resolved = await resolveForexTrades(s);
+      if (resolved > 0) saveState(s);
+    }
+  } catch {}
+}, 10000);
 import { buildPolymarketAuthHeaders, buildKalshiAuthHeaders, runPolymarketConnectionTest, runKalshiConnectionTest, fetchPolymarketMarkets, fetchKalshiMarkets } from './platforms.js';
 import { websocketState, flushWsTicksBuffer, applyWebsocketConfig, stopWebsocket } from './websockets.js';
 import { scannerRuntime, scanAudit, runScanCycle, onScanFailure, ensureScanScheduler, scanAndRankMarkets } from './scanner.js';
@@ -221,6 +234,65 @@ app.post('/api/step1/finalize', async (_, res) => {
 
 app.post('/api/markets/reset', (req, res) => { const s = loadState(); const prev = s.markets.length; s.markets = []; s.scan_results = []; s.scan_runs = []; s.scan_history = {}; s.research_briefs = []; s.predictions = []; logLine(s, 'warning', 'markets reset'); saveState(s); res.json({ ok: true, previous_markets: prev }); });
 app.post('/api/trades/reset', (req, res) => { const s = loadState(); const prev = (s.trades||[]).length; s.trades = []; s.signals = []; s.orders = []; s.execution_runs = []; s.risk = { peak_bankroll: Number(s.config?.bankroll||1000), drawdown_pct: 0, daily_realized_pnl: 0, open_exposure_usd: 0, open_positions: 0, level: 'OK' }; s.step4_summary = { completed_at: null, candidate_signals:0, executed_orders:0, skipped_orders:0, opened_trades:0, risk_blocked_orders:0, paper_mode: true }; s.compound_summary = null; s.risk_runs = []; logLine(s, 'warning', `trades reset (${prev} deleted, risk+drawdown reset)`); saveState(s); res.json({ ok: true, previous_trades: prev }); });
+
+// ═══ FOREX SIGNALS ═══
+app.get('/api/forex/pairs', (_, res) => res.json({ pairs: FOREX_PAIRS }));
+app.post('/api/forex/scan', async (req, res) => {
+  try {
+    const interval = req.body?.interval || '5min';
+    const pairs = req.body?.pairs || null;
+    const result = await scanForexSignals(pairs, interval);
+    // Store signals
+    const s = loadState();
+    s.forex_signals = result;
+    s.forex_runs = s.forex_runs || [];
+    s.forex_runs.unshift({ time: result.time, interval, pairs_scanned: result.signals.length, signals_found: result.signals.filter(s => s.direction !== 'WAIT').length });
+    s.forex_runs = s.forex_runs.slice(0, 100);
+    saveState(s);
+    res.json({ ok: true, ...result });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+app.get('/api/forex/signals', (_, res) => { const s = loadState(); res.json(s.forex_signals || { signals: [] }); });
+
+// Forex Paper Trading
+app.post('/api/forex/trade', async (req, res) => {
+  try {
+    const { symbol, direction, duration_min, amount } = req.body || {};
+    if (!symbol || !direction || !duration_min || !amount) return res.status(400).json({ ok: false, error: 'symbol, direction, duration_min, amount required' });
+    const s = loadState();
+    // Fetch entry price
+    const candles = await fetchCandleData(symbol, '1min', 3);
+    const entryPrice = candles[candles.length - 1]?.close;
+    if (!entryPrice) return res.status(500).json({ ok: false, error: 'Could not fetch entry price' });
+    const result = openForexPaperTrade(s, { symbol, direction, duration_min, amount });
+    if (!result.ok) return res.status(400).json(result);
+    result.trade.entry_price = entryPrice;
+    saveState(s);
+    res.json({ ok: true, trade: result.trade, bankroll: s.forex_bankroll });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.get('/api/forex/stats', async (_, res) => {
+  const s = loadState();
+  // Try to resolve expired trades
+  const resolved = await resolveForexTrades(s).catch(() => 0);
+  if (resolved > 0) saveState(s);
+  res.json(getForexStats(s));
+});
+
+app.get('/api/forex/trades', (_, res) => {
+  const s = loadState();
+  res.json({ trades: (s.forex_trades || []).slice(0, 100), bankroll: s.forex_bankroll ?? Number(s.config?.forex_bankroll || 100) });
+});
+
+app.post('/api/forex/reset', (_, res) => {
+  const s = loadState();
+  const prev = (s.forex_trades || []).length;
+  s.forex_trades = [];
+  s.forex_bankroll = Number(s.config?.forex_bankroll || 100);
+  saveState(s);
+  res.json({ ok: true, previous_trades: prev, bankroll: s.forex_bankroll });
+});
 
 // Export bot performance data for external analysis
 app.get('/api/export/performance', (_, res) => {

@@ -73,6 +73,18 @@ export function defaultState() {
       llm_delay_between_markets_ms: 4000,
       llm_max_tokens: 500,
       strategy_version: 3, // v3: Superforecaster prompt with decomposition + base rates
+
+      // Forex / Binary Options signals
+      forex_api_key: '',
+      forex_data_provider: 'twelvedata', // 'twelvedata' or 'alphavantage'
+      forex_pairs: 'EUR/USD,GBP/USD,USD/JPY,AUD/USD',
+      forex_interval: '5min', // 1min, 5min, 15min, 30min, 1h
+      forex_min_confidence: 0.35,
+      forex_bankroll: 100,
+      forex_payout_pct: 85,
+      forex_max_concurrent: 2,
+      forex_default_duration: 3,
+      forex_default_amount: 5,
       llm_temperature: 0.1,
       llm_weight_openai: 0.35,
       llm_weight_claude: 0.25,

@@ -237,7 +237,6 @@ export async function runScanCycle({ persist = true, force = false } = {}) {
 
   // Aggressive DB cleanup: expired, closed, stale (not seen in 2 scans), and very old markets
   const beforePurge = state.markets.length;
-  const now = Date.now();
   const staleAfterMs = 4 * 60 * 60 * 1000; // 4 hours = consider market stale if not refreshed
 
   state.markets = (state.markets || []).filter(m => {
