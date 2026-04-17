@@ -18,7 +18,7 @@ function ForexDashboard({cfg,apiFetch,act,busy,setMsg,forexSignals,setForexSigna
   const [trades,setTrades]=React.useState([]);
   const [dur,setDur]=React.useState(Number(cfg.forex_default_duration||3));
   const [amt,setAmt]=React.useState(Number(cfg.forex_default_amount||5));
-  const refresh=React.useCallback(async()=>{try{const r=await apiFetch('/api/forex/stats');setStats(r);setTrades(r?.open||[]);}catch{}},[apiFetch]);
+  const refresh=React.useCallback(async()=>{try{const r=await apiFetch('/api/forex/stats');const d=await r.json();setStats(d);setTrades(d?.open||[]);}catch{}},[apiFetch]);
   React.useEffect(()=>{refresh();const t=setInterval(refresh,5000);return()=>clearInterval(t);},[refresh]);
   const doTrade=async(symbol,direction)=>{
     const r=await apiFetch('/api/forex/trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol,direction,duration_min:dur,amount:amt})});
@@ -149,7 +149,7 @@ function ForexDashboard({cfg,apiFetch,act,busy,setMsg,forexSignals,setForexSigna
 
 function ForexTradeList({apiFetch,C,mono,fmt}){
   const [trades,setTrades]=React.useState([]);
-  React.useEffect(()=>{(async()=>{try{const r=await apiFetch('/api/forex/trades');setTrades(r?.trades||[]);}catch{}})();},[apiFetch]);
+  React.useEffect(()=>{(async()=>{try{const r=await apiFetch('/api/forex/trades');const d=await r.json();setTrades(d?.trades||[]);}catch{}})();},[apiFetch]);
   const closed=trades.filter(t=>t.status==='CLOSED').slice(0,30);
   if(!closed.length)return<div style={{color:C.muted,fontSize:11,padding:6}}>Noch keine abgeschlossenen Trades.</div>;
   return<div style={{maxHeight:300,overflow:'auto'}}>{closed.map((t,i)=><div key={i} style={{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:`1px solid ${C.border}11`,fontSize:10,...mono}}>
@@ -927,11 +927,11 @@ export default function App(){
               {key:'forex_pairs',label:'Währungspaare',rec:'EUR/USD,GBP/USD,USD/JPY,AUD/USD',desc:'Komma-getrennte Paare.',why:'Majors haben den engsten Spread.',type:'text'},
               {key:'forex_interval',label:'Kerzen-Intervall',rec:'5min',desc:'1min, 5min, 15min, 30min, 1h.',why:'5min ist guter Kompromiss.'},
               {key:'forex_bankroll',label:'Forex Bankroll ($)',rec:100,desc:'Startkapital für Forex Paper Trading (getrennt vom PM-Bot).',why:'Starte mit $100 zum Testen.'},
-              {key:'forex_payout_pct',label:'Auszahlung (%)',rec:85,desc:'Gewinn-Prozent bei richtigem Trade.',why:'PocketOption zahlt ca. 85%. Andere Broker variieren.'},
-              {key:'forex_max_concurrent',label:'Max gleichzeitige Trades',rec:2,desc:'Wie viele Trades gleichzeitig offen sein dürfen.',why:'2 begrenzt das Risiko. Mehr = aggressiver.'},
+              {key:'forex_payout_pct',label:'Auszahlung (%)',rec:85,desc:'Gewinn-Prozent bei richtigem Trade.',why:'PocketOption zahlt ca. 85%.'},
+              {key:'forex_max_concurrent',label:'Max gleichzeitige Trades',rec:2,desc:'Wie viele Trades gleichzeitig offen sein dürfen.',why:'2 begrenzt das Risiko.'},
               {key:'forex_default_amount',label:'Standard-Einsatz ($)',rec:5,desc:'Voreingestellter Einsatz pro Trade.',why:'$5 bei $100 Bankroll = 5% pro Trade.'},
               {key:'forex_default_duration',label:'Standard-Dauer (Min)',rec:3,desc:'Voreingestellte Laufzeit in Minuten.',why:'3 Min ist ein guter Kompromiss.'},
-            ].map(({key,label,rec,desc,why,type})=><SettingRow key={key} k={key} label={label} rec={rec} desc={desc} why={why} type={type||'number'} value={cfg[key]} onChange={v=>setCfg(c=>({...c,[key]:v}))}/>)}
+            ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
           </Card>
           {/* System */}
           <Card title="🔧 System" help="Logging und sonstige Einstellungen.">
