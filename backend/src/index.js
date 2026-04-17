@@ -30,7 +30,7 @@ import { loadSkillProfiles } from './stepRegistry.js';
 import { liveCommLog } from './utils.js';
 import { computeBrierCalibration } from './utils.js';
 import { registerAuthRoutes } from './auth.js';
-import { scanForexSignals, FOREX_PAIRS, openForexPaperTrade, resolveForexTrades, getForexStats, fetchCandleData } from './forexSignals.js';
+import { scanForexSignals, FOREX_PAIRS, openForexPaperTrade, resolveForexTrades, getForexStats, fetchCandleData, analyzeForexLearning, getForexLlmOpinion } from './forexSignals.js';
 
 // Auto-resolve forex trades every 10 seconds
 setInterval(async () => {
@@ -257,14 +257,13 @@ app.get('/api/forex/signals', (_, res) => { const s = loadState(); res.json(s.fo
 // Forex Paper Trading
 app.post('/api/forex/trade', async (req, res) => {
   try {
-    const { symbol, direction, duration_min, amount } = req.body || {};
+    const { symbol, direction, duration_min, amount, signal_data } = req.body || {};
     if (!symbol || !direction || !duration_min || !amount) return res.status(400).json({ ok: false, error: 'symbol, direction, duration_min, amount required' });
     const s = loadState();
-    // Fetch entry price
     const candles = await fetchCandleData(symbol, '1min', 3);
     const entryPrice = candles[candles.length - 1]?.close;
     if (!entryPrice) return res.status(500).json({ ok: false, error: 'Could not fetch entry price' });
-    const result = openForexPaperTrade(s, { symbol, direction, duration_min, amount });
+    const result = openForexPaperTrade(s, { symbol, direction, duration_min, amount, signal_data });
     if (!result.ok) return res.status(400).json(result);
     result.trade.entry_price = entryPrice;
     saveState(s);
@@ -274,7 +273,6 @@ app.post('/api/forex/trade', async (req, res) => {
 
 app.get('/api/forex/stats', async (_, res) => {
   const s = loadState();
-  // Try to resolve expired trades
   const resolved = await resolveForexTrades(s).catch(() => 0);
   if (resolved > 0) saveState(s);
   res.json(getForexStats(s));
@@ -283,6 +281,22 @@ app.get('/api/forex/stats', async (_, res) => {
 app.get('/api/forex/trades', (_, res) => {
   const s = loadState();
   res.json({ trades: (s.forex_trades || []).slice(0, 100), bankroll: s.forex_bankroll ?? Number(s.config?.forex_bankroll || 100) });
+});
+
+// Learning & LLM
+app.get('/api/forex/learning', (_, res) => {
+  const s = loadState();
+  res.json(analyzeForexLearning(s));
+});
+
+app.post('/api/forex/llm-opinion', async (req, res) => {
+  try {
+    const { signal } = req.body || {};
+    if (!signal) return res.status(400).json({ ok: false, error: 'signal required' });
+    const s = loadState();
+    const result = await getForexLlmOpinion(signal, s);
+    res.json({ ok: true, ...result });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 app.post('/api/forex/reset', (_, res) => {
