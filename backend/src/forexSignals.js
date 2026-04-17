@@ -167,10 +167,8 @@ export async function fetchCandleData(symbol, interval = '5min', outputsize = 50
   const cfg = loadState().config || {};
   const apiKey = String(cfg.forex_api_key || '').trim();
   const provider = String(cfg.forex_data_provider || 'twelvedata');
-  const cleanSymbol = symbol.replace('/', '');
-
   if (provider === 'twelvedata') {
-    const url = `https://api.twelvedata.com/time_series?symbol=${cleanSymbol}&interval=${interval}&outputsize=${outputsize}&apikey=${apiKey || 'demo'}`;
+    const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${interval}&outputsize=${outputsize}&apikey=${apiKey || 'demo'}`;
     const resp = await fetchWithRetry(url, {}, { label: 'forex-data', retries: 1, timeoutMs: 10000, silent: true });
     const data = await resp.json();
     if (data.status === 'error') throw new Error(data.message || 'TwelveData error');
@@ -181,6 +179,7 @@ export async function fetchCandleData(symbol, interval = '5min', outputsize = 50
   }
 
   if (provider === 'alphavantage') {
+    const cleanSymbol = symbol.replace('/', '');
     const fn = interval.includes('min') ? 'TIME_SERIES_INTRADAY' : 'TIME_SERIES_DAILY';
     const url = `https://www.alphavantage.co/query?function=${fn}&symbol=${cleanSymbol}&interval=${interval}&outputsize=compact&apikey=${apiKey || 'demo'}`;
     const resp = await fetchWithRetry(url, {}, { label: 'forex-data', retries: 1, timeoutMs: 10000, silent: true });
