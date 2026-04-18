@@ -270,8 +270,6 @@ function ForexTradeList({apiFetch,C,mono,fmt}){
   </div>)}</div>;
 }
 
-function ForexLearning({apiFetch,C,mono,fmt,Card,Metric}){
-
 // ═══ FOREX PRO TAB ═══
 function ForexProTab({cfg,apiFetch,act,busy,setMsg,proStats,setProStats,proRecs,setProRecs,C,mono,fmt,Btn,Card,Metric}){
   const refresh=React.useCallback(async()=>{try{const r=await apiFetch('/api/forex-pro/stats');const d=await r.json();setProStats(d);}catch{}},[apiFetch,setProStats]);
