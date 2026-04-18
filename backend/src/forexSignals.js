@@ -327,24 +327,45 @@ function generateSignal(candles, symbol) {
 
 export async function scanForexSignals(pairs = null, interval = '5min') {
   const cfg = loadState().config || {};
+  const apiKey = String(cfg.forex_api_key || '').trim();
+  const provider = String(cfg.forex_data_provider || 'twelvedata');
   const pairsToScan = pairs || (cfg.forex_pairs || 'EUR/USD,GBP/USD,USD/JPY,AUD/USD').split(',').map(p => p.trim()).filter(Boolean);
   const signals = [];
 
+  // Pre-flight check
+  if (!apiKey) {
+    const errMsg = `Kein ${provider} API-Key eingetragen. Gehe zu Einstellungen → Forex → API Key. Kostenlos bei ${provider === 'twelvedata' ? 'twelvedata.com' : 'alphavantage.co'}`;
+    for (const symbol of pairsToScan) signals.push({ symbol, error: errMsg });
+    pushLiveComm('forex_error', { symbol: 'ALL', error: errMsg });
+    return { time: new Date().toISOString(), interval, signals, error: errMsg };
+  }
+
   for (const symbol of pairsToScan) {
     try {
+      pushLiveComm('forex_fetching', { symbol, interval, provider });
       const candles = await fetchCandleData(symbol, interval, 60);
+      if (!candles.length) {
+        signals.push({ symbol, error: `Keine Kerzen-Daten von ${provider}. Markt geschlossen?` });
+        continue;
+      }
       const signal = generateSignal(candles, symbol);
       signal.interval = interval;
       signals.push(signal);
-      pushLiveComm('forex_signal', { symbol, direction: signal.direction, strength: signal.signal_strength, confidence: signal.confidence });
+      pushLiveComm('forex_signal_ok', { symbol, direction: signal.direction, strength: signal.signal_strength, confidence: signal.confidence?.toFixed(2), price: signal.current_price?.toFixed(5) });
     } catch (e) {
-      signals.push({ symbol, error: String(e.message).slice(0, 100) });
-      pushLiveComm('forex_error', { symbol, error: String(e.message).slice(0, 80) });
+      const fullError = String(e.message || e).slice(0, 200);
+      signals.push({ symbol, error: fullError });
+      pushLiveComm('forex_error', { symbol, error: fullError, provider, interval });
+      console.error(`[forex] ${symbol} ${interval} error:`, fullError);
     }
     await new Promise(r => setTimeout(r, 1500));
   }
 
-  return { time: new Date().toISOString(), interval, signals };
+  const okCount = signals.filter(s => !s.error).length;
+  const errCount = signals.filter(s => s.error).length;
+  pushLiveComm('forex_scan_done', { ok: okCount, errors: errCount, interval, provider });
+
+  return { time: new Date().toISOString(), interval, signals, provider, api_key_set: !!apiKey };
 }
 
 // LLM-enhanced signal: sends indicators + learning data to LLM for smarter signals

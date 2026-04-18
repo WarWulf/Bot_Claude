@@ -189,7 +189,12 @@ function ForexDashboard({cfg,apiFetch,act,busy,setMsg,forexSignals,setForexSigna
             </div>
           </div>
 
-          {sig.error&&<div style={{color:C.red,fontSize:11,...mono}}>❌ {sig.error}</div>}
+          {sig.error&&<div style={{color:C.red,fontSize:11,...mono,padding:'4px 8px',background:`${C.red}08`,borderRadius:4,marginBottom:4}}>
+            ❌ {sig.error}
+            {sig.error.includes('API-Key')&&<div style={{color:C.amber,fontSize:10,marginTop:2}}>→ Einstellungen → Forex → API Key eintragen</div>}
+            {sig.error.includes('Markt geschlossen')&&<div style={{color:C.amber,fontSize:10,marginTop:2}}>→ Forex-Märkte sind Mo-Fr 22:00-22:00 UTC offen. Am Wochenende keine Daten.</div>}
+            {sig.error.includes('fetch failed')&&<div style={{color:C.amber,fontSize:10,marginTop:2}}>→ VPS kann die API nicht erreichen. Prüfe die Netzwerk-Einstellungen.</div>}
+          </div>}
 
           {!sig.error&&<>
             <div style={{display:'flex',flexWrap:'wrap',gap:4,marginBottom:4}}>
@@ -278,6 +283,11 @@ function ForexProTab({cfg,apiFetch,act,busy,setMsg,proStats,setProStats,proRecs,
   const pnl=proStats?.total_pnl||0;
 
   return<div>
+    {/* Diagnose */}
+    <div style={{display:'flex',gap:6,marginBottom:10}}>
+      <Btn onClick={()=>act('fxProDiag',async()=>{const r=await apiFetch('/api/forex/diagnose');const d=await r.json();if(d.result==='OK')setMsg(`✅ ${d.provider} API funktioniert! Preis: ${d.sample_price}`);else setMsg(`❌ ${d.error||'Fehler'}`);})} busy={busy.fxProDiag}>🔬 API testen</Btn>
+    </div>
+
     {/* Erklärung */}
     <Card title="💹 Forex Pro — Stop-Loss / Take-Profit" help="Realistisches Trading: Statt alles-oder-nichts (Binary Options) setzt du Stop-Loss und Take-Profit. Trade bleibt offen bis SL oder TP erreicht wird. Vorteil: Bei Risk:Reward 1:1.5 brauchst du nur 40% Win Rate für Profit!">
       <div style={{fontSize:11,lineHeight:1.6}}>
@@ -1046,6 +1056,11 @@ export default function App(){
       {/* TAB: FOREX SIGNALS                          */}
       {/* ═══════════════════════════════════════════ */}
       {tab==='forex'&&<div>
+        {/* Diagnose */}
+        <div style={{display:'flex',gap:6,marginBottom:10}}>
+          <Btn onClick={()=>act('fxDiag',async()=>{const r=await apiFetch('/api/forex/diagnose');const d=await r.json();if(d.result==='OK')setMsg(`✅ ${d.provider} API funktioniert! Preis: ${d.sample_price} (${d.sample_time})`);else setMsg(`❌ ${d.error||'Unbekannter Fehler'}${d.raw_response?.message?' — Raw: '+d.raw_response.message:''}`);},true)} busy={busy.fxDiag}>🔬 Forex API testen</Btn>
+        </div>
+
         {/* CALL/PUT Erklärung */}
         <Card title="Was bedeutet CALL und PUT?" help="Grundlagen für Binary Options / Forex Trading.">
           <div style={{fontSize:11,lineHeight:1.6}}>

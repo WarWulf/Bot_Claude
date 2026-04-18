@@ -280,6 +280,66 @@ app.post('/api/forex/scan', async (req, res) => {
 });
 app.get('/api/forex/signals', (_, res) => { const s = loadState(); res.json(s.forex_signals || { signals: [] }); });
 
+// Forex Diagnose — test API connectivity
+app.get('/api/forex/diagnose', async (_, res) => {
+  const s = loadState();
+  const cfg = s.config || {};
+  const apiKey = String(cfg.forex_api_key || '').trim();
+  const provider = String(cfg.forex_data_provider || 'twelvedata');
+  const diag = {
+    api_key_set: !!apiKey,
+    api_key_preview: apiKey ? apiKey.slice(0, 4) + '***' + apiKey.slice(-3) : '(leer)',
+    provider,
+    test_symbol: 'EUR/USD',
+    result: null,
+    error: null,
+    raw_response: null,
+  };
+
+  if (!apiKey) {
+    diag.error = `Kein API-Key! Gehe zu Einstellungen → Forex → API Key eintragen. Kostenlos bei ${provider === 'twelvedata' ? 'twelvedata.com' : 'alphavantage.co'}`;
+    return res.json(diag);
+  }
+
+  try {
+    if (provider === 'twelvedata') {
+      const url = `https://api.twelvedata.com/time_series?symbol=EUR/USD&interval=5min&outputsize=3&apikey=${apiKey}`;
+      const resp = await fetchWithRetry(url, {}, { label: 'forex-diagnose', retries: 1, timeoutMs: 12000, silent: true });
+      const data = await resp.json();
+      diag.raw_response = { status: data.status, meta: data.meta, values_count: (data.values || []).length, message: data.message };
+      if (data.status === 'error') {
+        diag.error = `TwelveData Fehler: ${data.message || 'unbekannt'}`;
+        if (String(data.message || '').includes('apikey')) diag.error += ' → API-Key ungültig!';
+        if (String(data.message || '').includes('symbol')) diag.error += ' → Symbol nicht gefunden!';
+      } else if ((data.values || []).length > 0) {
+        diag.result = 'OK';
+        diag.sample_price = data.values[0]?.close;
+        diag.sample_time = data.values[0]?.datetime;
+      } else {
+        diag.error = 'Keine Daten zurückgegeben. Markt geschlossen?';
+      }
+    } else if (provider === 'alphavantage') {
+      const url = `https://www.alphavantage.co/query?function=FX_INTRADAY&from_symbol=EUR&to_symbol=USD&interval=5min&outputsize=compact&apikey=${apiKey}`;
+      const resp = await fetchWithRetry(url, {}, { label: 'forex-diagnose', retries: 1, timeoutMs: 12000, silent: true });
+      const data = await resp.json();
+      const tsKey = Object.keys(data).find(k => k.includes('Time Series'));
+      diag.raw_response = { keys: Object.keys(data), has_time_series: !!tsKey, note: data['Note'], error: data['Error Message'] };
+      if (data['Error Message']) diag.error = `AlphaVantage: ${data['Error Message']}`;
+      else if (data['Note']) diag.error = 'AlphaVantage: Rate Limit. Warte 1 Minute.';
+      else if (tsKey) { diag.result = 'OK'; diag.sample_entries = Object.keys(data[tsKey]).length; }
+      else diag.error = 'Keine Daten. API-Key korrekt?';
+    }
+  } catch (e) {
+    diag.error = `Verbindungsfehler: ${e.message}. VPS kann ${provider} nicht erreichen?`;
+  }
+
+  diag.recommendation = diag.result === 'OK'
+    ? '✅ API funktioniert! Du kannst Forex scannen.'
+    : diag.error || '❌ Unbekannter Fehler';
+
+  res.json(diag);
+});
+
 // Forex Paper Trading
 app.post('/api/forex/trade', async (req, res) => {
   try {
