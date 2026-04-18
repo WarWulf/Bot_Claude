@@ -167,32 +167,53 @@ export async function fetchCandleData(symbol, interval = '5min', outputsize = 50
   const cfg = loadState().config || {};
   const apiKey = String(cfg.forex_api_key || '').trim();
   const provider = String(cfg.forex_data_provider || 'twelvedata');
+
+  if (!apiKey) {
+    throw new Error('Kein Forex API-Key! Gehe zu Einstellungen → Forex → trage deinen Key ein. Kostenlos bei twelvedata.com');
+  }
+
   if (provider === 'twelvedata') {
-    const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${interval}&outputsize=${outputsize}&apikey=${apiKey || 'demo'}`;
-    const resp = await fetchWithRetry(url, {}, { label: 'forex-data', retries: 1, timeoutMs: 10000, silent: true });
+    // TwelveData uses EUR/USD format directly
+    const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${interval}&outputsize=${outputsize}&apikey=${apiKey}`;
+    pushLiveComm('forex_fetch', { url: url.replace(apiKey, '***'), symbol, interval });
+    const resp = await fetchWithRetry(url, {}, { label: 'forex-data', retries: 1, timeoutMs: 12000, silent: true });
     const data = await resp.json();
-    if (data.status === 'error') throw new Error(data.message || 'TwelveData error');
-    const values = (data.values || []).reverse(); // oldest first
+    if (data.status === 'error') {
+      const msg = String(data.message || '');
+      if (msg.includes('apikey') || msg.includes('API key')) throw new Error('TwelveData API-Key ungültig. Prüfe den Key in den Einstellungen.');
+      if (msg.includes('symbol')) throw new Error(`TwelveData: Symbol "${symbol}" nicht gefunden. Probiere z.B. EUR/USD`);
+      throw new Error(`TwelveData: ${msg.slice(0, 120)}`);
+    }
+    if (!data.values || !data.values.length) throw new Error(`TwelveData: keine Daten für ${symbol} ${interval}. Markt geschlossen?`);
+    const values = (data.values || []).reverse();
     return values.map(v => ({
       time: v.datetime, open: Number(v.open), high: Number(v.high), low: Number(v.low), close: Number(v.close), volume: Number(v.volume || 0),
     }));
   }
 
   if (provider === 'alphavantage') {
-    const cleanSymbol = symbol.replace('/', '');
-    const fn = interval.includes('min') ? 'TIME_SERIES_INTRADAY' : 'TIME_SERIES_DAILY';
-    const url = `https://www.alphavantage.co/query?function=${fn}&symbol=${cleanSymbol}&interval=${interval}&outputsize=compact&apikey=${apiKey || 'demo'}`;
-    const resp = await fetchWithRetry(url, {}, { label: 'forex-data', retries: 1, timeoutMs: 10000, silent: true });
+    // AlphaVantage uses FX_INTRADAY with from_symbol/to_symbol
+    const parts = symbol.split('/');
+    if (parts.length !== 2) throw new Error(`Ungültiges Symbol: ${symbol}. Format: EUR/USD`);
+    const [from, to] = parts;
+    const fn = interval.includes('min') ? 'FX_INTRADAY' : 'FX_DAILY';
+    const url = fn === 'FX_INTRADAY'
+      ? `https://www.alphavantage.co/query?function=${fn}&from_symbol=${from}&to_symbol=${to}&interval=${interval}&outputsize=compact&apikey=${apiKey}`
+      : `https://www.alphavantage.co/query?function=${fn}&from_symbol=${from}&to_symbol=${to}&outputsize=compact&apikey=${apiKey}`;
+    pushLiveComm('forex_fetch', { url: url.replace(apiKey, '***'), symbol, interval });
+    const resp = await fetchWithRetry(url, {}, { label: 'forex-data', retries: 1, timeoutMs: 12000, silent: true });
     const data = await resp.json();
+    if (data['Error Message']) throw new Error(`AlphaVantage: ${data['Error Message'].slice(0, 100)}`);
+    if (data['Note']) throw new Error('AlphaVantage: Rate Limit erreicht. Warte 1 Minute.');
     const tsKey = Object.keys(data).find(k => k.includes('Time Series'));
-    if (!tsKey) throw new Error('AlphaVantage: no time series data');
+    if (!tsKey) throw new Error(`AlphaVantage: keine Daten für ${symbol}. API-Key korrekt?`);
     const entries = Object.entries(data[tsKey]).reverse().slice(-outputsize);
     return entries.map(([dt, v]) => ({
-      time: dt, open: Number(v['1. open']), high: Number(v['2. high']), low: Number(v['3. low']), close: Number(v['4. close']), volume: Number(v['5. volume'] || 0),
+      time: dt, open: Number(v['1. open']), high: Number(v['2. high']), low: Number(v['3. low']), close: Number(v['4. close']), volume: 0,
     }));
   }
 
-  throw new Error(`Unknown forex provider: ${provider}`);
+  throw new Error(`Unbekannter Provider: ${provider}. Nutze 'twelvedata' oder 'alphavantage'.`);
 }
 
 // ═══════════════════════════════════════════
@@ -683,4 +704,443 @@ export function buildForexLlmContext(state) {
   }
 
   return lines.join('\n');
+}
+
+// ═══════════════════════════════════════════
+// SMART RECOMMENDATIONS (uses learning + indicators)
+// ═══════════════════════════════════════════
+
+export function generateForexRecommendations(signals, state) {
+  const cfg = state.config || {};
+  const learning = analyzeForexLearning(state);
+  const bankroll = state.forex_bankroll ?? Number(cfg.forex_bankroll || 100);
+  const payoutPct = Number(cfg.forex_payout_pct || 85);
+  const maxConcurrent = Number(cfg.forex_max_concurrent || 2);
+  const openCount = (state.forex_trades || []).filter(t => t.status === 'OPEN').length;
+  const slotsAvailable = maxConcurrent - openCount;
+
+  const recommendations = [];
+
+  for (const sig of signals) {
+    if (sig.error || sig.direction === 'WAIT') continue;
+
+    // Start with technical confidence
+    let score = sig.confidence || 0;
+    let reasons = [];
+    let warnings = [];
+
+    // Boost/penalize based on learning data
+    if (learning.ready) {
+      const pairData = learning.by_pair.find(p => p.pair === sig.symbol);
+      if (pairData && pairData.total >= 3) {
+        if (pairData.win_rate >= 58) {
+          score += 0.15;
+          reasons.push(`${sig.symbol} hat ${pairData.win_rate}% WR in ${pairData.total} Trades`);
+        } else if (pairData.win_rate < 48) {
+          score -= 0.2;
+          warnings.push(`${sig.symbol} hat nur ${pairData.win_rate}% WR — schlecht!`);
+        }
+      }
+
+      // Check best duration from learning
+      const durData = learning.by_duration;
+      if (durData.length && durData[0].win_rate >= 55) {
+        reasons.push(`Beste Dauer: ${durData[0].duration} (${durData[0].win_rate}% WR)`);
+      }
+
+      // Check direction bias
+      const dirData = learning.by_direction.find(d => d.direction === sig.direction);
+      if (dirData && dirData.total >= 5) {
+        if (dirData.win_rate >= 58) {
+          score += 0.1;
+          reasons.push(`${sig.direction} gewinnt ${dirData.win_rate}% der Zeit`);
+        } else if (dirData.win_rate < 45) {
+          score -= 0.15;
+          warnings.push(`${sig.direction} gewinnt nur ${dirData.win_rate}%`);
+        }
+      }
+
+      // Check indicator reliability
+      for (const ind of learning.by_indicator) {
+        if (ind.accuracy >= 60 && sig.indicators?.[ind.indicator]?.score) {
+          const agrees = (sig.direction === 'CALL' && sig.indicators[ind.indicator].score > 0) || (sig.direction === 'PUT' && sig.indicators[ind.indicator].score < 0);
+          if (agrees) {
+            score += 0.05;
+            reasons.push(`${ind.indicator.toUpperCase()} ist zuverlässig (${ind.accuracy}%) und bestätigt ${sig.direction}`);
+          }
+        }
+        if (ind.accuracy < 40 && ind.total >= 5) {
+          warnings.push(`${ind.indicator.toUpperCase()} ist unzuverlässig (${ind.accuracy}%)`);
+        }
+      }
+
+      // Time of day factor
+      const currentHour = new Date().getUTCHours();
+      const hourData = learning.by_hour.find(h => h.hour === currentHour);
+      if (hourData && hourData.total >= 3) {
+        if (hourData.win_rate >= 60) {
+          score += 0.1;
+          reasons.push(`${currentHour}:00 UTC ist eine gute Stunde (${hourData.win_rate}% WR)`);
+        } else if (hourData.win_rate < 40) {
+          score -= 0.1;
+          warnings.push(`${currentHour}:00 UTC hat schlechte WR (${hourData.win_rate}%)`);
+        }
+      }
+    }
+
+    // Determine recommended duration (from learning or default)
+    let recDuration = Number(cfg.forex_default_duration || 3);
+    if (learning.ready && learning.by_duration.length) {
+      const bestDur = learning.by_duration.find(d => d.win_rate >= 55 && d.total >= 3);
+      if (bestDur) recDuration = parseInt(bestDur.duration) || recDuration;
+    }
+
+    // Position sizing based on confidence (simple Kelly-like)
+    const winProb = Math.min(0.8, Math.max(0.3, 0.5 + score * 0.3));
+    const kellyPct = Math.max(0, (winProb * (payoutPct / 100) - (1 - winProb)) / (payoutPct / 100));
+    const quarterKelly = kellyPct * 0.25;
+    const recAmount = Math.max(1, Math.min(bankroll * 0.1, Math.round(bankroll * quarterKelly)));
+
+    // Final recommendation
+    const finalScore = Math.max(0, Math.min(1, score));
+    const action = finalScore >= 0.5 ? 'TRADE' : finalScore >= 0.3 ? 'MAYBE' : 'SKIP';
+
+    recommendations.push({
+      symbol: sig.symbol,
+      direction: sig.direction,
+      action,
+      score: Number(finalScore.toFixed(3)),
+      confidence_pct: Number((finalScore * 100).toFixed(0)),
+      recommended_amount: recAmount,
+      recommended_duration: recDuration,
+      max_amount: Math.round(bankroll * 0.1),
+      signal_strength: sig.signal_strength,
+      technical_confidence: sig.confidence,
+      reasons,
+      warnings,
+      indicator_summary: Object.entries(sig.indicators || {}).map(([k, v]) => `${k}:${v.score > 0 ? '+' : ''}${v.score.toFixed(1)}`).join(' '),
+      current_price: sig.current_price,
+    });
+  }
+
+  // Sort by score, best first
+  recommendations.sort((a, b) => b.score - a.score);
+
+  return {
+    time: new Date().toISOString(),
+    bankroll,
+    slots_available: slotsAvailable,
+    recommendations,
+    learning_active: learning.ready,
+    overall_win_rate: learning.ready ? learning.overall_win_rate : null,
+  };
+}
+
+// ═══════════════════════════════════════════
+// AUTO-TRADING
+// ═══════════════════════════════════════════
+
+export async function runForexAutoTrade(state) {
+  const cfg = state.config || {};
+  if (!cfg.forex_auto_enabled) return { executed: 0, reason: 'auto_disabled' };
+
+  const bankroll = state.forex_bankroll ?? Number(cfg.forex_bankroll || 100);
+  if (bankroll < 2) return { executed: 0, reason: 'bankroll_too_low' };
+
+  const maxConcurrent = Number(cfg.forex_max_concurrent || 2);
+  const openCount = (state.forex_trades || []).filter(t => t.status === 'OPEN').length;
+  if (openCount >= maxConcurrent) return { executed: 0, reason: 'max_concurrent_reached' };
+
+  const minScore = Number(cfg.forex_auto_min_score || 0.5);
+
+  // Scan fresh signals
+  const scanResult = await scanForexSignals(null, cfg.forex_interval || '5min');
+  state.forex_signals = scanResult;
+
+  // Generate recommendations
+  const recs = generateForexRecommendations(scanResult.signals, state);
+
+  // Find best tradeable recommendation
+  const tradeable = recs.recommendations.filter(r => r.action === 'TRADE' && r.score >= minScore);
+  if (!tradeable.length) return { executed: 0, reason: 'no_strong_signals', scanned: scanResult.signals.length, best_score: recs.recommendations[0]?.score || 0 };
+
+  // Execute top recommendation
+  const best = tradeable[0];
+  const signalData = scanResult.signals.find(s => s.symbol === best.symbol);
+
+  // Fetch entry price
+  const candles = await fetchCandleData(best.symbol, '1min', 3);
+  const entryPrice = candles[candles.length - 1]?.close;
+  if (!entryPrice) return { executed: 0, reason: 'no_entry_price' };
+
+  const result = openForexPaperTrade(state, {
+    symbol: best.symbol,
+    direction: best.direction,
+    duration_min: best.recommended_duration,
+    amount: best.recommended_amount,
+    signal_data: signalData,
+  });
+
+  if (!result.ok) return { executed: 0, reason: result.error };
+  result.trade.entry_price = entryPrice;
+
+  pushLiveComm('forex_auto_trade', {
+    symbol: best.symbol, direction: best.direction,
+    amount: best.recommended_amount, duration: best.recommended_duration,
+    score: best.score, entry: entryPrice,
+  });
+
+  return {
+    executed: 1,
+    trade: result.trade,
+    recommendation: best,
+    bankroll: state.forex_bankroll,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// FOREX PRO — Stop-Loss / Take-Profit System (realistisches Trading)
+// ═══════════════════════════════════════════════════════════════
+// Statt Binary Options (alles oder nichts) arbeitet dieses System mit:
+// - Stop-Loss: Maximaler Verlust pro Trade (z.B. 20 Pips)
+// - Take-Profit: Gewinnziel (z.B. 30 Pips)
+// - Risk:Reward Ratio (z.B. 1:1.5 → für jeden $1 Risiko, $1.50 Gewinn)
+// - Position Sizing: Riskiere nur X% der Bankroll pro Trade
+
+export function openForexProTrade(state, { symbol, direction, sl_pips, tp_pips, risk_pct, entry_price, signal_data }) {
+  const cfg = state.config || {};
+  state.forex_pro_trades = state.forex_pro_trades || [];
+  state.forex_pro_bankroll = state.forex_pro_bankroll ?? Number(cfg.forex_pro_bankroll || 1000);
+
+  const bankroll = state.forex_pro_bankroll;
+  if (bankroll < 10) return { ok: false, error: `Bankroll zu niedrig ($${bankroll})` };
+
+  const maxConcurrent = Number(cfg.forex_pro_max_concurrent || 3);
+  const openCount = state.forex_pro_trades.filter(t => t.status === 'OPEN').length;
+  if (openCount >= maxConcurrent) return { ok: false, error: `Max ${maxConcurrent} gleichzeitige Trades (${openCount} offen)` };
+
+  // Position sizing based on risk
+  const riskPercent = Math.min(0.05, Math.max(0.005, Number(risk_pct || cfg.forex_pro_risk_pct || 0.02)));
+  const riskAmount = bankroll * riskPercent;
+  const slPips = Number(sl_pips || cfg.forex_pro_default_sl || 20);
+  const tpPips = Number(tp_pips || cfg.forex_pro_default_tp || 30);
+  const pipValue = symbol.includes('JPY') ? 0.01 : 0.0001;
+
+  // Calculate SL and TP prices
+  const slPrice = direction === 'CALL'
+    ? entry_price - (slPips * pipValue)
+    : entry_price + (slPips * pipValue);
+  const tpPrice = direction === 'CALL'
+    ? entry_price + (tpPips * pipValue)
+    : entry_price - (tpPips * pipValue);
+
+  const riskReward = tpPips / slPips;
+
+  // Extract indicator snapshot
+  const indicators = {};
+  if (signal_data?.indicators) {
+    for (const [name, ind] of Object.entries(signal_data.indicators)) {
+      indicators[name] = { score: ind.score };
+    }
+  }
+
+  const trade = {
+    id: 'fp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+    type: 'PRO',
+    symbol, direction,
+    entry_price: Number(entry_price.toFixed(6)),
+    stop_loss: Number(slPrice.toFixed(6)),
+    take_profit: Number(tpPrice.toFixed(6)),
+    sl_pips: slPips,
+    tp_pips: tpPips,
+    risk_reward: Number(riskReward.toFixed(2)),
+    risk_amount: Number(riskAmount.toFixed(2)),
+    risk_pct: Number((riskPercent * 100).toFixed(1)),
+    status: 'OPEN',
+    result: null, // WIN, LOSS, or MANUAL_CLOSE
+    pnl: 0,
+    opened_at: new Date().toISOString(),
+    closed_at: null,
+    current_price: entry_price,
+    current_pnl_pips: 0,
+    // Learning data
+    confidence: signal_data?.confidence || 0,
+    signal_strength: signal_data?.signal_strength || 'NONE',
+    avg_score: signal_data?.avg_score || 0,
+    indicators,
+    patterns: (signal_data?.patterns || []).map(p => p.name || p),
+    hour: new Date().getUTCHours(),
+    interval: signal_data?.interval || cfg.forex_interval || '5min',
+  };
+
+  state.forex_pro_trades.unshift(trade);
+  return { ok: true, trade };
+}
+
+export async function resolveForexProTrades(state) {
+  state.forex_pro_trades = state.forex_pro_trades || [];
+  let resolved = 0;
+
+  const openTrades = state.forex_pro_trades.filter(t => t.status === 'OPEN');
+  if (!openTrades.length) return 0;
+
+  // Group by symbol to minimize API calls
+  const symbols = [...new Set(openTrades.map(t => t.symbol))];
+
+  for (const symbol of symbols) {
+    try {
+      const candles = await fetchCandleData(symbol, '1min', 3);
+      const currentPrice = candles[candles.length - 1]?.close;
+      const highPrice = Math.max(...candles.map(c => c.high));
+      const lowPrice = Math.min(...candles.map(c => c.low));
+      if (!currentPrice) continue;
+
+      for (const trade of openTrades.filter(t => t.symbol === symbol)) {
+        trade.current_price = currentPrice;
+        const pipValue = symbol.includes('JPY') ? 0.01 : 0.0001;
+        trade.current_pnl_pips = trade.direction === 'CALL'
+          ? Math.round((currentPrice - trade.entry_price) / pipValue)
+          : Math.round((trade.entry_price - currentPrice) / pipValue);
+
+        // Check if SL or TP was hit (using high/low for more realistic fills)
+        let hit = null;
+        if (trade.direction === 'CALL') {
+          if (lowPrice <= trade.stop_loss) hit = 'LOSS';
+          else if (highPrice >= trade.take_profit) hit = 'WIN';
+        } else {
+          if (highPrice >= trade.stop_loss) hit = 'LOSS';
+          else if (lowPrice <= trade.take_profit) hit = 'WIN';
+        }
+
+        if (hit) {
+          trade.result = hit;
+          trade.status = 'CLOSED';
+          trade.closed_at = new Date().toISOString();
+          trade.exit_price = hit === 'WIN' ? trade.take_profit : trade.stop_loss;
+
+          if (hit === 'WIN') {
+            const pnlPips = trade.tp_pips;
+            trade.pnl = Number((trade.risk_amount * trade.risk_reward).toFixed(2));
+            trade.current_pnl_pips = pnlPips;
+          } else {
+            trade.pnl = -trade.risk_amount;
+            trade.current_pnl_pips = -trade.sl_pips;
+          }
+
+          state.forex_pro_bankroll = Number((state.forex_pro_bankroll + trade.pnl).toFixed(2));
+          resolved++;
+          pushLiveComm('forex_pro_resolved', { symbol, direction: trade.direction, result: hit, pnl: trade.pnl, pips: trade.current_pnl_pips });
+        }
+      }
+    } catch (e) {
+      pushLiveComm('forex_pro_error', { symbol, error: e.message });
+    }
+  }
+  return resolved;
+}
+
+export function closeForexProTrade(state, tradeId) {
+  const trade = (state.forex_pro_trades || []).find(t => t.id === tradeId && t.status === 'OPEN');
+  if (!trade) return { ok: false, error: 'Trade nicht gefunden oder bereits geschlossen' };
+
+  const pipValue = trade.symbol.includes('JPY') ? 0.01 : 0.0001;
+  const pnlPips = trade.direction === 'CALL'
+    ? (trade.current_price - trade.entry_price) / pipValue
+    : (trade.entry_price - trade.current_price) / pipValue;
+
+  // PnL proportional to pips gained vs SL distance
+  trade.pnl = Number((trade.risk_amount * (pnlPips / trade.sl_pips)).toFixed(2));
+  trade.result = trade.pnl >= 0 ? 'WIN' : 'LOSS';
+  trade.status = 'CLOSED';
+  trade.closed_at = new Date().toISOString();
+  trade.exit_price = trade.current_price;
+  trade.current_pnl_pips = Math.round(pnlPips);
+
+  state.forex_pro_bankroll = Number((state.forex_pro_bankroll + trade.pnl).toFixed(2));
+  return { ok: true, trade };
+}
+
+export function getForexProStats(state) {
+  const cfg = state.config || {};
+  const trades = (state.forex_pro_trades || []).filter(t => t.status === 'CLOSED');
+  const open = (state.forex_pro_trades || []).filter(t => t.status === 'OPEN');
+  const wins = trades.filter(t => t.result === 'WIN');
+  const losses = trades.filter(t => t.result === 'LOSS');
+  const totalPnl = trades.reduce((s, t) => s + Number(t.pnl || 0), 0);
+  const grossProfit = wins.reduce((s, t) => s + Number(t.pnl || 0), 0);
+  const grossLoss = Math.abs(losses.reduce((s, t) => s + Number(t.pnl || 0), 0));
+  const startBankroll = Number(cfg.forex_pro_bankroll || 1000);
+  const bankroll = state.forex_pro_bankroll ?? startBankroll;
+
+  // Average RR achieved
+  const avgRR = wins.length ? (wins.reduce((s, t) => s + (t.risk_reward || 1), 0) / wins.length) : 0;
+
+  return {
+    bankroll: Number(bankroll.toFixed(2)),
+    starting_bankroll: startBankroll,
+    total_pnl: Number(totalPnl.toFixed(2)),
+    pnl_pct: startBankroll > 0 ? Number((totalPnl / startBankroll * 100).toFixed(1)) : 0,
+    total_trades: trades.length,
+    open_trades: open.length,
+    wins: wins.length,
+    losses: losses.length,
+    win_rate: trades.length ? Number((wins.length / trades.length * 100).toFixed(1)) : 0,
+    profit_factor: grossLoss > 0 ? Number((grossProfit / grossLoss).toFixed(2)) : 0,
+    avg_risk_reward: Number(avgRR.toFixed(2)),
+    breakeven_rate: avgRR > 0 ? Number((100 / (1 + avgRR)).toFixed(0)) : 50,
+    open: open.map(t => ({
+      ...t,
+      pnl_color: t.current_pnl_pips > 0 ? 'green' : t.current_pnl_pips < 0 ? 'red' : 'neutral',
+    })),
+  };
+}
+
+// Smart recommendations for Pro mode
+export function generateForexProRecommendations(signals, state) {
+  const cfg = state.config || {};
+  const bankroll = state.forex_pro_bankroll ?? Number(cfg.forex_pro_bankroll || 1000);
+  const riskPct = Number(cfg.forex_pro_risk_pct || 0.02);
+  const defaultSL = Number(cfg.forex_pro_default_sl || 20);
+  const defaultTP = Number(cfg.forex_pro_default_tp || 30);
+  const learning = analyzeForexLearning(state); // Reuse learning from binary trades too
+
+  const recommendations = [];
+
+  for (const sig of signals) {
+    if (sig.error || sig.direction === 'WAIT') continue;
+
+    // ATR-based SL/TP
+    let slPips = defaultSL;
+    let tpPips = defaultTP;
+    if (sig.atr) {
+      const pipValue = sig.symbol?.includes('JPY') ? 0.01 : 0.0001;
+      const atrPips = Math.round(sig.atr / pipValue);
+      slPips = Math.max(10, Math.round(atrPips * 1.5)); // 1.5x ATR for SL
+      tpPips = Math.max(15, Math.round(atrPips * 2.5)); // 2.5x ATR for TP (1:1.67 RR)
+    }
+
+    const rr = tpPips / slPips;
+    const breakevenWR = 100 / (1 + rr);
+    const riskAmount = Math.round(bankroll * riskPct);
+    const score = sig.confidence || 0;
+
+    recommendations.push({
+      symbol: sig.symbol,
+      direction: sig.direction,
+      action: score >= 0.45 ? 'TRADE' : score >= 0.25 ? 'MAYBE' : 'SKIP',
+      score: Number(score.toFixed(3)),
+      sl_pips: slPips,
+      tp_pips: tpPips,
+      risk_reward: Number(rr.toFixed(2)),
+      breakeven_wr: Number(breakevenWR.toFixed(0)),
+      risk_amount: riskAmount,
+      risk_pct: Number((riskPct * 100).toFixed(1)),
+      current_price: sig.current_price,
+      signal_strength: sig.signal_strength,
+      indicator_summary: Object.entries(sig.indicators || {}).map(([k, v]) => `${k}:${v.score > 0 ? '+' : ''}${v.score.toFixed(1)}`).join(' '),
+    });
+  }
+
+  recommendations.sort((a, b) => b.score - a.score);
+  return { time: new Date().toISOString(), bankroll, recommendations };
 }

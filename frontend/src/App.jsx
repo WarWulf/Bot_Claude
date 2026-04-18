@@ -19,12 +19,16 @@ function ForexDashboard({cfg,apiFetch,act,busy,setMsg,forexSignals,setForexSigna
   const [dur,setDur]=React.useState(Number(cfg.forex_default_duration||3));
   const [amt,setAmt]=React.useState(Number(cfg.forex_default_amount||5));
   const [llmOpinions,setLlmOpinions]=React.useState({});
+  const [recs,setRecs]=React.useState(null);
+  const [autoMode,setAutoMode]=React.useState(!!cfg.forex_auto_enabled);
   const refresh=React.useCallback(async()=>{try{const r=await apiFetch('/api/forex/stats');const d=await r.json();setStats(d);setTrades(d?.open||[]);}catch{}},[apiFetch]);
   React.useEffect(()=>{refresh();const t=setInterval(refresh,5000);return()=>clearInterval(t);},[refresh]);
-  const doTrade=async(symbol,direction,signalData)=>{
-    const r=await apiFetch('/api/forex/trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol,direction,duration_min:dur,amount:amt,signal_data:signalData||null})});
+  const doTrade=async(symbol,direction,signalData,recAmount,recDuration)=>{
+    const tradeAmt=recAmount||amt;
+    const tradeDur=recDuration||dur;
+    const r=await apiFetch('/api/forex/trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol,direction,duration_min:tradeDur,amount:tradeAmt,signal_data:signalData||null})});
     const p=await r.json();if(!p.ok)throw new Error(p.error);
-    setMsg(`✅ ${direction} ${symbol} — $${amt} für ${dur} Min. Einstieg: ${p.trade.entry_price}`);refresh();
+    setMsg(`✅ ${direction} ${symbol} — $${tradeAmt} für ${tradeDur} Min. Einstieg: ${p.trade.entry_price}`);refresh();
   };
   const askLlm=async(signal,idx)=>{
     const r=await apiFetch('/api/forex/llm-opinion',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({signal})});
@@ -33,6 +37,12 @@ function ForexDashboard({cfg,apiFetch,act,busy,setMsg,forexSignals,setForexSigna
     if(d.opinion?.take_trade===true)setMsg(`🤖 KI sagt: JA — ${d.opinion.reason}`);
     else if(d.opinion?.take_trade===false)setMsg(`🤖 KI sagt: NEIN — ${d.opinion.reason}`);
     else setMsg(`🤖 KI: ${d.reason||'keine Meinung'}`);
+  };
+  const toggleAuto=async()=>{
+    const newState=!autoMode;
+    await apiFetch('/api/forex/auto',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:newState})});
+    setAutoMode(newState);
+    setMsg(newState?'✅ Auto-Trading AN — Bot handelt selbstständig':'Auto-Trading AUS');
   };
 
   const bankroll=stats?.bankroll??Number(cfg.forex_bankroll||100);
@@ -65,7 +75,15 @@ function ForexDashboard({cfg,apiFetch,act,busy,setMsg,forexSignals,setForexSigna
           </select>
         </div>
         <Btn variant="warn" onClick={()=>{if(!confirm('Forex-Daten zurücksetzen?'))return;act('fxReset',async()=>{await apiFetch('/api/forex/reset',{method:'POST'});setMsg('✅ Forex Reset — Bankroll zurückgesetzt');refresh();});}} busy={busy.fxReset} style={{fontSize:10}}>🔄 Reset</Btn>
+        <Btn onClick={toggleAuto} style={{background:autoMode?`${C.green}22`:`${C.dim}22`,color:autoMode?C.green:C.muted,border:`1px solid ${autoMode?C.green:C.dim}44`}}>
+          {autoMode?'🟢 Auto AN':'⚪ Auto AUS'} ({cfg.forex_auto_interval_min||5}min)
+        </Btn>
       </div>
+
+      {/* Auto-Mode Info */}
+      {autoMode&&<div style={{fontSize:10,...mono,padding:'6px 10px',background:`${C.green}08`,borderRadius:6,border:`1px solid ${C.green}22`,marginBottom:10,color:C.green}}>
+        🤖 Auto-Trading aktiv — Bot scannt alle {cfg.forex_auto_interval_min||5} Min und handelt automatisch wenn Score ≥ {Number(cfg.forex_auto_min_score||0.5)*100}%. Max {cfg.forex_max_concurrent||2} gleichzeitig.
+      </div>}
 
       {/* Open Trades with Countdown */}
       {(stats?.open||[]).length>0&&<div style={{marginBottom:10}}>
@@ -83,8 +101,72 @@ function ForexDashboard({cfg,apiFetch,act,busy,setMsg,forexSignals,setForexSigna
       </div>}
     </Card>
 
-    {/* Scan + Signal Cards */}
-    <Card title="🔍 Signale scannen" help="Scanne Währungspaare nach technischen Signalen. Klicke auf 📈 CALL oder 📉 PUT um einen Paper Trade zu eröffnen.">
+    {/* Smart Recommendations */}
+    <Card title="🎯 Empfehlungen" help="Der Bot analysiert alle Paare, berechnet Indikatoren, prüft deine Trade-Historie und empfiehlt: welches Paar, CALL oder PUT, wie viel setzen, wie lange. Grün = starkes Signal. Gelb = möglich. Grau = abwarten.">
+      <div style={{display:'flex',gap:6,marginBottom:10,flexWrap:'wrap'}}>
+        <Btn onClick={()=>act('fxRec',async()=>{const r=await apiFetch('/api/forex/recommendations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({interval:cfg.forex_interval||'5min'})});const p=await r.json();if(!p.ok)throw new Error(p.error||'Failed');setRecs(p);setForexSignals((p.recommendations||[]).map(r=>r));setMsg(`✅ ${p.recommendations?.length||0} Empfehlungen (${p.recommendations?.filter(r=>r.action==='TRADE').length||0}× handeln)`);})} busy={busy.fxRec}>🎯 Jetzt analysieren ({cfg.forex_interval||'5min'})</Btn>
+        {recs?.learning_active&&<span style={{fontSize:10,...mono,color:C.green,padding:'5px 0'}}>🧠 Learning aktiv ({recs.overall_win_rate}% WR)</span>}
+        {recs&&!recs.learning_active&&<span style={{fontSize:10,...mono,color:C.dim,padding:'5px 0'}}>📊 Noch kein Learning (min 3 Trades)</span>}
+      </div>
+
+      {(recs?.recommendations||[]).map((rec,i)=>{
+        const actionColor=rec.action==='TRADE'?C.green:rec.action==='MAYBE'?C.amber:C.dim;
+        const actionEmoji=rec.action==='TRADE'?'🟢':rec.action==='MAYBE'?'🟡':'⚪';
+        const sig=forexSignals.find(s=>s.symbol===rec.symbol)||{};
+        return <div key={i} style={{marginBottom:10,padding:'10px 12px',borderRadius:8,border:`1px solid ${actionColor}44`,background:`${actionColor}06`}}>
+          {/* Header */}
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+            <div>
+              <span style={{fontSize:15,fontWeight:700}}>{rec.symbol}</span>
+              <span style={{fontSize:12,...mono,color:rec.direction==='CALL'?C.green:C.red,marginLeft:8,fontWeight:600}}>{rec.direction==='CALL'?'📈 CALL':'📉 PUT'}</span>
+              <span style={{fontSize:11,...mono,color:C.muted,marginLeft:6}}>{rec.current_price?.toFixed(5)}</span>
+            </div>
+            <div style={{textAlign:'right'}}>
+              <div style={{fontSize:13,fontWeight:700,color:actionColor}}>{actionEmoji} {rec.action==='TRADE'?'HANDELN':rec.action==='MAYBE'?'MÖGLICH':'ABWARTEN'}</div>
+              <div style={{fontSize:10,...mono,color:C.muted}}>Score: {rec.confidence_pct}%</div>
+            </div>
+          </div>
+
+          {/* Recommendation Details */}
+          <div style={{display:'flex',gap:12,marginBottom:6,padding:'6px 10px',background:C.bg,borderRadius:6,fontSize:11,...mono}}>
+            <div><span style={{color:C.muted}}>Einsatz: </span><span style={{color:C.cyan,fontWeight:600}}>${rec.recommended_amount}</span></div>
+            <div><span style={{color:C.muted}}>Dauer: </span><span style={{color:C.cyan,fontWeight:600}}>{rec.recommended_duration} Min</span></div>
+            <div><span style={{color:C.muted}}>Max: </span><span style={{color:C.dim}}>${rec.max_amount}</span></div>
+            <div><span style={{color:C.muted}}>Indikatoren: </span><span style={{color:C.dim}}>{rec.indicator_summary}</span></div>
+          </div>
+
+          {/* Reasons + Warnings */}
+          {rec.reasons.length>0&&<div style={{fontSize:10,...mono,marginBottom:4}}>
+            {rec.reasons.map((r,j)=><div key={j} style={{color:C.green}}>✅ {r}</div>)}
+          </div>}
+          {rec.warnings.length>0&&<div style={{fontSize:10,...mono,marginBottom:4}}>
+            {rec.warnings.map((w,j)=><div key={j} style={{color:C.amber}}>⚠ {w}</div>)}
+          </div>}
+
+          {/* Action Buttons */}
+          <div style={{display:'flex',gap:6,marginTop:6,flexWrap:'wrap'}}>
+            <Btn onClick={()=>act('fxTrade'+i,async()=>{await doTrade(rec.symbol,rec.direction,sig,rec.recommended_amount,rec.recommended_duration);refresh();})} busy={busy['fxTrade'+i]} style={{background:`${rec.direction==='CALL'?C.green:C.red}22`,color:rec.direction==='CALL'?C.green:C.red,border:`1px solid ${rec.direction==='CALL'?C.green:C.red}44`}}>
+              {rec.direction==='CALL'?'📈':'📉'} {rec.direction} ${rec.recommended_amount} für {rec.recommended_duration}min
+            </Btn>
+            <Btn onClick={()=>act('fxLlm'+i,async()=>{const fullSig=forexSignals.find(s=>s.symbol===rec.symbol);if(fullSig)await askLlm(fullSig,i);})} busy={busy['fxLlm'+i]} style={{background:`${C.purple}22`,color:C.purple,border:`1px solid ${C.purple}44`}}>🤖 KI fragen</Btn>
+          </div>
+
+          {/* LLM Opinion */}
+          {llmOpinions[i]&&<div style={{marginTop:6,padding:'6px 10px',borderRadius:6,background:llmOpinions[i].opinion?.take_trade?`${C.green}08`:`${C.red}08`,border:`1px solid ${llmOpinions[i].opinion?.take_trade?C.green:C.red}33`}}>
+            <div style={{fontSize:11,fontWeight:600,color:llmOpinions[i].opinion?.take_trade?C.green:C.red}}>
+              🤖 {llmOpinions[i].provider||'KI'}: {llmOpinions[i].opinion?.take_trade?'✅ JA':'❌ NEIN'}
+            </div>
+            {llmOpinions[i].opinion?.reason&&<div style={{fontSize:10,color:C.muted,marginTop:2,...mono}}>{llmOpinions[i].opinion.reason}</div>}
+          </div>}
+        </div>;
+      })}
+
+      {recs&&!recs.recommendations.length&&<div style={{color:C.muted,fontSize:11,padding:6}}>Keine Signale gefunden. Markt geschlossen oder alle Paare neutral.</div>}
+      {!recs&&<div style={{color:C.muted,fontSize:11,padding:6}}>Klicke "🎯 Jetzt analysieren" für Empfehlungen.</div>}
+    </Card>
+
+    {/* Raw Scan (for advanced users) */}
+    <Card title="🔍 Signale scannen" help="Rohe technische Analyse — alle Indikatoren im Detail. Klicke auf CALL oder PUT für manuellen Trade mit eigenem Einsatz/Dauer.">
       <div style={{display:'flex',gap:6,marginBottom:10,flexWrap:'wrap'}}>
         <Btn onClick={()=>act('forexScan',async()=>{const r=await apiFetch('/api/forex/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({interval:cfg.forex_interval||'5min'})});const p=await r.json();if(!p.ok)throw new Error(p.error||'Scan failed');setForexSignals(p.signals||[]);setMsg(`✅ ${p.signals.length} Paare — ${p.signals.filter(s=>s.direction!=='WAIT').length} Signale`);})} busy={busy.forexScan}>🔍 Scan ({cfg.forex_interval||'5min'})</Btn>
         {['1min','5min','15min','1h'].map(iv=><Btn key={iv} onClick={()=>act('fxIv'+iv,async()=>{const r=await apiFetch('/api/forex/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({interval:iv})});const p=await r.json();if(!p.ok)throw new Error(p.error);setForexSignals(p.signals||[]);setMsg(`✅ ${iv}: ${p.signals.filter(s=>s.direction!=='WAIT').length} Signale`);})} busy={busy['fxIv'+iv]} style={{fontSize:10,padding:'3px 8px'}}>{iv}</Btn>)}
@@ -189,6 +271,111 @@ function ForexTradeList({apiFetch,C,mono,fmt}){
 }
 
 function ForexLearning({apiFetch,C,mono,fmt,Card,Metric}){
+
+// ═══ FOREX PRO TAB ═══
+function ForexProTab({cfg,apiFetch,act,busy,setMsg,proStats,setProStats,proRecs,setProRecs,C,mono,fmt,Btn,Card,Metric}){
+  const refresh=React.useCallback(async()=>{try{const r=await apiFetch('/api/forex-pro/stats');const d=await r.json();setProStats(d);}catch{}},[apiFetch,setProStats]);
+  React.useEffect(()=>{refresh();const t=setInterval(refresh,5000);return()=>clearInterval(t);},[refresh]);
+  const bankroll=proStats?.bankroll??Number(cfg.forex_pro_bankroll||1000);
+  const pnl=proStats?.total_pnl||0;
+
+  return<div>
+    {/* Erklärung */}
+    <Card title="💹 Forex Pro — Stop-Loss / Take-Profit" help="Realistisches Trading: Statt alles-oder-nichts (Binary Options) setzt du Stop-Loss und Take-Profit. Trade bleibt offen bis SL oder TP erreicht wird. Vorteil: Bei Risk:Reward 1:1.5 brauchst du nur 40% Win Rate für Profit!">
+      <div style={{fontSize:11,lineHeight:1.6}}>
+        <div style={{display:'flex',gap:12,marginBottom:6}}>
+          <div style={{flex:1,padding:'8px 10px',borderRadius:6,background:`${C.red}08`,border:`1px solid ${C.red}33`}}>
+            <div style={{fontWeight:700,color:C.red,fontSize:12}}>🛑 Stop-Loss (SL)</div>
+            <div style={{color:C.muted,fontSize:10}}>Maximaler Verlust. z.B. SL=20 Pips → verlierst du max 2% deiner Bankroll ($20 bei $1000). Schützt dein Kapital.</div>
+          </div>
+          <div style={{flex:1,padding:'8px 10px',borderRadius:6,background:`${C.green}08`,border:`1px solid ${C.green}33`}}>
+            <div style={{fontWeight:700,color:C.green,fontSize:12}}>🎯 Take-Profit (TP)</div>
+            <div style={{color:C.muted,fontSize:10}}>Gewinnziel. z.B. TP=30 Pips → gewinnst du 3% ($30 bei $1000). Bei 1:1.5 RR brauchst du nur 40% Treffer!</div>
+          </div>
+        </div>
+        <div style={{fontSize:10,color:C.dim}}>Beispiel: EUR/USD bei 1.08500. CALL mit SL=20 Pips (1.08300), TP=30 Pips (1.08800). Risiko: $20. Gewinn wenn TP: $30. Verlust wenn SL: $20. Risk:Reward = 1:1.5.</div>
+      </div>
+    </Card>
+
+    {/* Bankroll & Stats */}
+    <Card title="💰 Forex Pro Paper Trading">
+      <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:10}}>
+        <Metric label="Bankroll" value={`$${fmt(bankroll,0)}`} good={pnl>=0}/>
+        <Metric label="P&L" value={`${pnl>=0?'+':''}$${fmt(pnl,2)}`} good={pnl>=0}/>
+        <Metric label="Win Rate" value={`${proStats?.win_rate||0}%`} target={`≥${proStats?.breakeven_rate||40}%`} good={Number(proStats?.win_rate||0)>=Number(proStats?.breakeven_rate||40)}/>
+        <Metric label="Trades" value={`${proStats?.wins||0}W / ${proStats?.losses||0}L`}/>
+        <Metric label="Profit Factor" value={proStats?.profit_factor||'—'} target="≥1.5" good={Number(proStats?.profit_factor||0)>=1.5}/>
+        <Metric label="Avg R:R" value={proStats?.avg_risk_reward||'—'}/>
+        <Metric label="Offen" value={proStats?.open_trades||0}/>
+      </div>
+      <div style={{display:'flex',gap:6}}>
+        <Btn variant="warn" onClick={()=>{if(!confirm('Forex Pro zurücksetzen?'))return;act('fxProReset',async()=>{await apiFetch('/api/forex-pro/reset',{method:'POST'});setMsg('✅ Forex Pro Reset');refresh();});}} busy={busy.fxProReset} style={{fontSize:10}}>🔄 Reset</Btn>
+      </div>
+    </Card>
+
+    {/* Open Trades with live P&L */}
+    {(proStats?.open||[]).length>0&&<Card title={`⏱ Offene Trades (${proStats.open.length})`}>
+      {proStats.open.map((t,i)=><div key={i} style={{padding:'8px 10px',marginBottom:6,borderRadius:6,background:t.current_pnl_pips>0?`${C.green}06`:t.current_pnl_pips<0?`${C.red}06`:'transparent',border:`1px solid ${t.current_pnl_pips>0?C.green:t.current_pnl_pips<0?C.red:C.border}33`}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <div>
+            <span style={{fontSize:13,fontWeight:600}}>{t.symbol}</span>
+            <span style={{fontSize:11,...mono,color:t.direction==='CALL'?C.green:C.red,marginLeft:6}}>{t.direction==='CALL'?'📈 LONG':'📉 SHORT'}</span>
+          </div>
+          <span style={{fontSize:14,fontWeight:700,...mono,color:t.current_pnl_pips>0?C.green:t.current_pnl_pips<0?C.red:C.muted}}>{t.current_pnl_pips>0?'+':''}{t.current_pnl_pips} Pips</span>
+        </div>
+        <div style={{display:'flex',gap:10,fontSize:10,...mono,color:C.muted,marginTop:4}}>
+          <span>Einstieg: {t.entry_price?.toFixed(5)}</span>
+          <span>Aktuell: {t.current_price?.toFixed(5)}</span>
+          <span style={{color:C.red}}>SL: {t.stop_loss?.toFixed(5)} (-{t.sl_pips}p)</span>
+          <span style={{color:C.green}}>TP: {t.take_profit?.toFixed(5)} (+{t.tp_pips}p)</span>
+          <span>Risiko: ${t.risk_amount}</span>
+        </div>
+        <div style={{marginTop:6}}>
+          <Btn onClick={()=>act('fxProClose'+i,async()=>{const r=await apiFetch('/api/forex-pro/close',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({trade_id:t.id})});const d=await r.json();if(!d.ok)throw new Error(d.error);setMsg(`Trade geschlossen: ${d.trade.current_pnl_pips} Pips (${d.trade.pnl>=0?'+':''}$${d.trade.pnl})`);refresh();})} busy={busy['fxProClose'+i]} variant="warn" style={{fontSize:10}}>✂️ Jetzt schließen</Btn>
+        </div>
+      </div>)}
+    </Card>}
+
+    {/* Recommendations */}
+    <Card title="🎯 Empfehlungen" help="Analysiert alle Paare und empfiehlt Trades mit SL/TP basierend auf ATR (Volatilität). Längere Zeitrahmen (15min, 1h) liefern bessere Signale als 1-5min.">
+      <div style={{display:'flex',gap:6,marginBottom:10,flexWrap:'wrap'}}>
+        <Btn onClick={()=>act('fxProRec',async()=>{const r=await apiFetch('/api/forex-pro/recommendations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({interval:cfg.forex_interval||'15min'})});const d=await r.json();if(!d.ok)throw new Error(d.error);setProRecs(d);setMsg(`✅ ${d.recommendations?.length||0} Empfehlungen`);})} busy={busy.fxProRec}>🎯 Analysieren ({cfg.forex_interval||'15min'})</Btn>
+        {['5min','15min','1h','4h'].map(iv=><Btn key={iv} onClick={()=>act('fxProIv'+iv,async()=>{const r=await apiFetch('/api/forex-pro/recommendations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({interval:iv})});const d=await r.json();if(!d.ok)throw new Error(d.error);setProRecs(d);setMsg(`✅ ${iv}: ${d.recommendations?.filter(r=>r.action==='TRADE').length||0} Signale`);})} busy={busy['fxProIv'+iv]} style={{fontSize:10,padding:'3px 8px'}}>{iv}</Btn>)}
+      </div>
+
+      {(proRecs?.recommendations||[]).map((rec,i)=>{
+        const ac=rec.action==='TRADE'?C.green:rec.action==='MAYBE'?C.amber:C.dim;
+        return<div key={i} style={{marginBottom:10,padding:'10px 12px',borderRadius:8,border:`1px solid ${ac}44`,background:`${ac}06`}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+            <div>
+              <span style={{fontSize:15,fontWeight:700}}>{rec.symbol}</span>
+              <span style={{fontSize:12,...mono,color:rec.direction==='CALL'?C.green:C.red,marginLeft:8,fontWeight:600}}>{rec.direction==='CALL'?'📈 LONG':'📉 SHORT'}</span>
+              <span style={{fontSize:11,...mono,color:C.muted,marginLeft:6}}>{rec.current_price?.toFixed(5)}</span>
+            </div>
+            <div style={{textAlign:'right'}}>
+              <div style={{fontSize:13,fontWeight:700,color:ac}}>{rec.action==='TRADE'?'🟢 HANDELN':rec.action==='MAYBE'?'🟡 MÖGLICH':'⚪ ABWARTEN'}</div>
+            </div>
+          </div>
+          <div style={{display:'flex',gap:10,padding:'6px 10px',background:C.bg,borderRadius:6,fontSize:11,...mono,flexWrap:'wrap',marginBottom:6}}>
+            <span><span style={{color:C.red}}>SL: {rec.sl_pips}p</span></span>
+            <span><span style={{color:C.green}}>TP: {rec.tp_pips}p</span></span>
+            <span>R:R = 1:{rec.risk_reward}</span>
+            <span>Risiko: ${rec.risk_amount} ({rec.risk_pct}%)</span>
+            <span>Break-even: {rec.breakeven_wr}% WR</span>
+          </div>
+          <div style={{fontSize:10,...mono,color:C.dim,marginBottom:6}}>{rec.indicator_summary}</div>
+          <Btn onClick={()=>act('fxProTrade'+i,async()=>{const r=await apiFetch('/api/forex-pro/trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:rec.symbol,direction:rec.direction,sl_pips:rec.sl_pips,tp_pips:rec.tp_pips,risk_pct:rec.risk_pct/100})});const d=await r.json();if(!d.ok)throw new Error(d.error);setMsg(`✅ ${rec.direction} ${rec.symbol} — SL:${rec.sl_pips}p TP:${rec.tp_pips}p Risiko:$${rec.risk_amount}`);refresh();})} busy={busy['fxProTrade'+i]} style={{background:`${rec.direction==='CALL'?C.green:C.red}22`,color:rec.direction==='CALL'?C.green:C.red,border:`1px solid ${rec.direction==='CALL'?C.green:C.red}44`}}>
+            {rec.direction==='CALL'?'📈':'📉'} {rec.direction} — SL:{rec.sl_pips}p TP:{rec.tp_pips}p Risiko:${rec.risk_amount}
+          </Btn>
+        </div>;
+      })}
+      {proRecs&&!proRecs.recommendations?.length&&<div style={{color:C.muted,fontSize:11,padding:6}}>Keine Signale. Markt neutral oder geschlossen.</div>}
+      {!proRecs&&<div style={{color:C.muted,fontSize:11,padding:6}}>Klicke "🎯 Analysieren" für Empfehlungen. Tipp: 15min oder 1h liefern bessere Signale als 1min/5min.</div>}
+    </Card>
+  </div>;
+}
+
+function ForexLearning({apiFetch,C,mono,fmt,Card,Metric}){
   const [data,setData]=React.useState(null);
   React.useEffect(()=>{(async()=>{try{const r=await apiFetch('/api/forex/learning');const d=await r.json();setData(d);}catch{}})();},[apiFetch]);
   if(!data||!data.ready)return<Card title="🧠 Forex Learning" help="Nach mindestens 3 abgeschlossenen Trades analysiert der Bot welche Paare, Zeitrahmen und Indikatoren am besten funktionieren."><div style={{color:C.muted,fontSize:11,padding:6}}>Noch nicht genug Daten. Mindestens 3 abgeschlossene Trades nötig (aktuell: {data?.current||0}).</div></Card>;
@@ -264,8 +451,8 @@ function SettingRow({item,value,onChange}){
   </div>;
 }
 
-const TABS=['pipeline','maerkte','ergebnisse','risk','forex','settings','log'];
-const TL={pipeline:'🚀 Pipeline',maerkte:'🏪 Märkte',ergebnisse:'📊 Ergebnisse',risk:'🛡️ Risk',forex:'📈 Forex',settings:'⚙️ Einstellungen',log:'📋 Log'};
+const TABS=['pipeline','maerkte','ergebnisse','risk','forex','forexpro','settings','log'];
+const TL={pipeline:'🚀 Pipeline',maerkte:'🏪 Märkte',ergebnisse:'📊 Ergebnisse',risk:'🛡️ Risk',forex:'📈 Binary',forexpro:'💹 Forex Pro',settings:'⚙️ Einstellungen',log:'📋 Log'};
 
 export default function App(){
   const [tab,setTab]=useState('pipeline');
@@ -296,6 +483,8 @@ export default function App(){
   const [llmTest,setLlmTest]=useState(null);
   const [allMarkets,setAllMarkets]=useState([]);
   const [forexSignals,setForexSignals]=useState([]);
+  const [proStats,setProStats]=useState(null);
+  const [proRecs,setProRecs]=useState(null);
 
   const apiFetch=useCallback(async(path,opts={})=>{const h={...(opts.headers||{})};if(uiPw)h['x-ui-password']=uiPw;return fetch(path,{...opts,headers:h});},[uiPw]);
   const apiJson=useCallback(async(path,fb=null)=>{try{const r=await apiFetch(path);if(!r.ok)throw 0;return await r.json();}catch{return fb;}},[apiFetch]);
@@ -881,6 +1070,11 @@ export default function App(){
       </div>}
 
       {/* ═══════════════════════════════════════════ */}
+      {/* TAB: FOREX PRO (SL/TP)                      */}
+      {/* ═══════════════════════════════════════════ */}
+      {tab==='forexpro'&&<ForexProTab cfg={cfg} apiFetch={apiFetch} act={act} busy={busy} setMsg={setMsg} proStats={proStats} setProStats={setProStats} proRecs={proRecs} setProRecs={setProRecs} C={C} mono={mono} fmt={fmt} Btn={Btn} Card={Card} Metric={Metric}/>}
+
+      {/* ═══════════════════════════════════════════ */}
       {/* TAB: EINSTELLUNGEN                          */}
       {/* ═══════════════════════════════════════════ */}
       {tab==='settings'&&<div>
@@ -1007,6 +1201,17 @@ export default function App(){
               {key:'forex_max_concurrent',label:'Max gleichzeitige Trades',rec:2,desc:'Wie viele Trades gleichzeitig offen sein dürfen.',why:'2 begrenzt das Risiko.'},
               {key:'forex_default_amount',label:'Standard-Einsatz ($)',rec:5,desc:'Voreingestellter Einsatz pro Trade.',why:'$5 bei $100 Bankroll = 5% pro Trade.'},
               {key:'forex_default_duration',label:'Standard-Dauer (Min)',rec:3,desc:'Voreingestellte Laufzeit in Minuten.',why:'3 Min ist ein guter Kompromiss.'},
+              {key:'forex_auto_enabled',label:'Auto-Trading',rec:false,desc:'Bot handelt automatisch basierend auf Signalen.',why:'Erst AN nach 20+ manuellen Trades mit guter Win Rate.',type:'bool'},
+              {key:'forex_auto_interval_min',label:'Auto-Intervall (Min)',rec:5,desc:'Wie oft der Bot nach Signalen sucht.',why:'5 Min = moderate Frequenz. 1 Min verbraucht viele API-Requests.'},
+              {key:'forex_auto_min_score',label:'Auto Min Score',rec:0.5,desc:'Minimaler Score damit der Bot automatisch handelt.',why:'0.5 = nur bei starken Signalen. 0.3 = auch bei schwächeren.'},
+            ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
+          </Card>
+          <Card title="💹 Forex Pro (SL/TP)" help="Realistisches Trading mit Stop-Loss und Take-Profit.">
+            {[{key:'forex_pro_bankroll',label:'Pro Bankroll ($)',rec:1000,desc:'Startkapital (getrennt von Binary).',why:'$1000 für realistisches Trading.'},
+              {key:'forex_pro_risk_pct',label:'Risiko pro Trade',rec:0.02,desc:'Anteil der Bankroll pro Trade. 0.02 = 2%.',why:'2% = professioneller Standard. Nie über 5%.'},
+              {key:'forex_pro_default_sl',label:'Stop-Loss (Pips)',rec:20,desc:'Maximaler Verlust. Wird an ATR angepasst.',why:'20 Pips für EUR/USD auf 15min.'},
+              {key:'forex_pro_default_tp',label:'Take-Profit (Pips)',rec:30,desc:'Gewinnziel. R:R 1:1.5 bei SL=20.',why:'30p = 1:1.5 R:R → nur 40% WR nötig!'},
+              {key:'forex_pro_max_concurrent',label:'Max Trades',rec:3,desc:'Maximale offene Trades.',why:'3 begrenzt Risiko.'},
             ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
           </Card>
           {/* System */}

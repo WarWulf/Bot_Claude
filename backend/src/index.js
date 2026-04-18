@@ -30,19 +30,45 @@ import { loadSkillProfiles } from './stepRegistry.js';
 import { liveCommLog } from './utils.js';
 import { computeBrierCalibration } from './utils.js';
 import { registerAuthRoutes } from './auth.js';
-import { scanForexSignals, FOREX_PAIRS, openForexPaperTrade, resolveForexTrades, getForexStats, fetchCandleData, analyzeForexLearning, getForexLlmOpinion } from './forexSignals.js';
+import { scanForexSignals, FOREX_PAIRS, openForexPaperTrade, resolveForexTrades, getForexStats, fetchCandleData, analyzeForexLearning, getForexLlmOpinion, generateForexRecommendations, runForexAutoTrade, openForexProTrade, resolveForexProTrades, closeForexProTrade, getForexProStats, generateForexProRecommendations } from './forexSignals.js';
 
-// Auto-resolve forex trades every 10 seconds
+// Auto-resolve forex trades every 10 seconds (both Binary + Pro)
 setInterval(async () => {
   try {
     const s = loadState();
-    const openCount = (s.forex_trades || []).filter(t => t.status === 'OPEN').length;
-    if (openCount > 0) {
-      const resolved = await resolveForexTrades(s);
-      if (resolved > 0) saveState(s);
-    }
+    let changed = false;
+    const openBinary = (s.forex_trades || []).filter(t => t.status === 'OPEN').length;
+    if (openBinary > 0) { const r = await resolveForexTrades(s); if (r > 0) changed = true; }
+    const openPro = (s.forex_pro_trades || []).filter(t => t.status === 'OPEN').length;
+    if (openPro > 0) { const r = await resolveForexProTrades(s); if (r > 0) changed = true; }
+    if (changed) saveState(s);
   } catch {}
 }, 10000);
+
+// Forex auto-trading timer
+let forexAutoTimer = null;
+function ensureForexAutoTrader() {
+  const cfg = loadState().config || {};
+  const enabled = cfg.forex_auto_enabled;
+  const intervalMin = Math.max(1, Number(cfg.forex_auto_interval_min || 5));
+
+  if (forexAutoTimer) { clearInterval(forexAutoTimer); forexAutoTimer = null; }
+  if (!enabled) return;
+
+  forexAutoTimer = setInterval(async () => {
+    try {
+      const s = loadState();
+      if (!s.config?.forex_auto_enabled) return;
+      const result = await runForexAutoTrade(s);
+      if (result.executed > 0) {
+        logLine(s, 'info', `forex auto: ${result.trade.direction} ${result.trade.symbol} $${result.recommendation.recommended_amount} für ${result.recommendation.recommended_duration}min (score: ${result.recommendation.score})`);
+      }
+      saveState(s);
+    } catch (e) { console.error('forex auto error:', e.message); }
+  }, intervalMin * 60 * 1000);
+  console.log(`[forex] Auto-trader enabled: every ${intervalMin}min`);
+}
+ensureForexAutoTrader();
 import { buildPolymarketAuthHeaders, buildKalshiAuthHeaders, runPolymarketConnectionTest, runKalshiConnectionTest, fetchPolymarketMarkets, fetchKalshiMarkets } from './platforms.js';
 import { websocketState, flushWsTicksBuffer, applyWebsocketConfig, stopWebsocket } from './websockets.js';
 import { scannerRuntime, scanAudit, runScanCycle, onScanFailure, ensureScanScheduler, scanAndRankMarkets } from './scanner.js';
@@ -306,6 +332,84 @@ app.post('/api/forex/reset', (_, res) => {
   s.forex_bankroll = Number(s.config?.forex_bankroll || 100);
   saveState(s);
   res.json({ ok: true, previous_trades: prev, bankroll: s.forex_bankroll });
+});
+
+// Recommendations — smart signals with position sizing + learning
+app.post('/api/forex/recommendations', async (req, res) => {
+  try {
+    const s = loadState();
+    const interval = req.body?.interval || s.config?.forex_interval || '5min';
+    const scanResult = await scanForexSignals(null, interval);
+    s.forex_signals = scanResult;
+    const recs = generateForexRecommendations(scanResult.signals, s);
+    saveState(s);
+    res.json({ ok: true, ...recs });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// Auto-trade toggle
+app.post('/api/forex/auto', (req, res) => {
+  const s = loadState();
+  s.config = s.config || {};
+  if (req.body?.enabled !== undefined) s.config.forex_auto_enabled = Boolean(req.body.enabled);
+  if (req.body?.interval_min) s.config.forex_auto_interval_min = Number(req.body.interval_min);
+  if (req.body?.min_score) s.config.forex_auto_min_score = Number(req.body.min_score);
+  saveState(s);
+  ensureForexAutoTrader();
+  res.json({ ok: true, auto_enabled: s.config.forex_auto_enabled, interval_min: s.config.forex_auto_interval_min || 5 });
+});
+
+// ═══ FOREX PRO (Stop-Loss / Take-Profit) ═══
+app.post('/api/forex-pro/trade', async (req, res) => {
+  try {
+    const { symbol, direction, sl_pips, tp_pips, risk_pct, signal_data } = req.body || {};
+    if (!symbol || !direction) return res.status(400).json({ ok: false, error: 'symbol + direction required' });
+    const s = loadState();
+    const candles = await fetchCandleData(symbol, '1min', 3);
+    const entryPrice = candles[candles.length - 1]?.close;
+    if (!entryPrice) return res.status(500).json({ ok: false, error: 'Kein Einstiegspreis verfügbar' });
+    const result = openForexProTrade(s, { symbol, direction, sl_pips, tp_pips, risk_pct, entry_price: entryPrice, signal_data });
+    if (!result.ok) return res.status(400).json(result);
+    saveState(s);
+    res.json({ ok: true, trade: result.trade, bankroll: s.forex_pro_bankroll });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/forex-pro/close', (req, res) => {
+  const { trade_id } = req.body || {};
+  if (!trade_id) return res.status(400).json({ ok: false, error: 'trade_id required' });
+  const s = loadState();
+  const result = closeForexProTrade(s, trade_id);
+  if (!result.ok) return res.status(400).json(result);
+  saveState(s);
+  res.json({ ok: true, trade: result.trade, bankroll: s.forex_pro_bankroll });
+});
+
+app.get('/api/forex-pro/stats', async (_, res) => {
+  const s = loadState();
+  await resolveForexProTrades(s).catch(() => 0);
+  saveState(s);
+  res.json(getForexProStats(s));
+});
+
+app.post('/api/forex-pro/recommendations', async (req, res) => {
+  try {
+    const s = loadState();
+    const interval = req.body?.interval || s.config?.forex_interval || '15min';
+    const scanResult = await scanForexSignals(null, interval);
+    s.forex_signals = scanResult;
+    const recs = generateForexProRecommendations(scanResult.signals, s);
+    saveState(s);
+    res.json({ ok: true, ...recs });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/forex-pro/reset', (_, res) => {
+  const s = loadState();
+  s.forex_pro_trades = [];
+  s.forex_pro_bankroll = Number(s.config?.forex_pro_bankroll || 1000);
+  saveState(s);
+  res.json({ ok: true, bankroll: s.forex_pro_bankroll });
 });
 
 // Export bot performance data for external analysis

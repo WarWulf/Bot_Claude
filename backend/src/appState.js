@@ -85,6 +85,16 @@ export function defaultState() {
       forex_max_concurrent: 2,
       forex_default_duration: 3,
       forex_default_amount: 5,
+      forex_auto_enabled: false,
+      forex_auto_interval_min: 5,
+      forex_auto_min_score: 0.5,
+
+      // Forex Pro (SL/TP)
+      forex_pro_bankroll: 1000,
+      forex_pro_risk_pct: 0.02,
+      forex_pro_default_sl: 20,
+      forex_pro_default_tp: 30,
+      forex_pro_max_concurrent: 3,
       llm_temperature: 0.1,
       llm_weight_openai: 0.35,
       llm_weight_claude: 0.25,
