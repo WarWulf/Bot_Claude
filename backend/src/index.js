@@ -27,7 +27,7 @@ import { resolve as resolvePath } from 'node:path';
 
 import { loadState, saveState, logLine, buildScannerHealth, maskProviderKeys, nextId, defaultState } from './appState.js';
 import { loadSkillProfiles } from './stepRegistry.js';
-import { liveCommLog, pushLiveComm } from './utils.js';
+import { liveCommLog, pushLiveComm, fetchWithRetry } from './utils.js';
 import { computeBrierCalibration } from './utils.js';
 import { registerAuthRoutes } from './auth.js';
 import { scanForexSignals, FOREX_PAIRS, openForexPaperTrade, resolveForexTrades, getForexStats, fetchCandleData, analyzeForexLearning, getForexLlmOpinion, generateForexRecommendations, runForexAutoTrade, openForexProTrade, resolveForexProTrades, closeForexProTrade, getForexProStats, generateForexProRecommendations, fetchForexNews, buildForexNewsContext, persistForexNews, createManualTradePlan, reportManualTradeResult, runBacktest } from './forexSignals.js';
