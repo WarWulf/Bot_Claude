@@ -35,19 +35,53 @@ export async function queryLlmProvider(providerName, providerCfg, globalCfg, pro
   const model = String(providerCfg.model || '').trim();
   const isLocalOllama = providerName === 'local_ollama';
   if ((!apiKey && !isLocalOllama) || !baseUrl || !model) return null;
-  const timeoutMs = Number(globalCfg.llm_timeout_ms || 25000); // Default 25s statt 12s
+  const timeoutMs = Number(globalCfg.llm_timeout_ms || 25000);
   const maxTokens = Number(globalCfg.llm_max_tokens || 220);
   const temperature = Number(globalCfg.llm_temperature ?? 0.1);
-  const maxRetries = Number(globalCfg.llm_retries || 2); // Retry on timeout
+  const maxRetries = Number(globalCfg.llm_retries || 2);
 
-  // Retry wrapper for timeout errors
+  // Log prompt to persistent LLM prompt log
+  if (globalCfg.llm_log_prompts !== false) {
+    try {
+      const { loadState: ls, saveState: ss } = await import('./appState.js');
+      const st = ls();
+      st.llm_prompt_log = st.llm_prompt_log || [];
+      const promptTokens = Math.round(prompt.length / 4); // rough estimate: 1 token ≈ 4 chars
+      st.llm_prompt_log.unshift({
+        time: new Date().toISOString(),
+        provider: providerName,
+        model: model,
+        prompt_length_chars: prompt.length,
+        prompt_tokens_est: promptTokens,
+        prompt_preview: prompt.slice(0, 500),
+        prompt_full: prompt.length > 3000 ? (prompt.slice(0, 1500) + '\n...[truncated ' + (prompt.length - 3000) + ' chars]...\n' + prompt.slice(-1500)) : prompt,
+      });
+      st.llm_prompt_log = st.llm_prompt_log.slice(0, 100);
+      ss(st);
+    } catch {}
+  }
+
   let lastError = null;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const attemptTimeout = timeoutMs * attempt; // 25s, then 50s
+    const attemptTimeout = timeoutMs * attempt;
     try {
       const start = Date.now();
       const result = await _queryLlmOnce(providerName, providerCfg, globalCfg, prompt, attemptTimeout, maxTokens, temperature, apiKey, baseUrl, model);
       markProviderResult(providerName, true, Date.now() - start);
+
+      // Log response
+      if (globalCfg.llm_log_prompts !== false) {
+        try {
+          const { loadState: ls, saveState: ss } = await import('./appState.js');
+          const st = ls();
+          if (st.llm_prompt_log?.[0]) {
+            st.llm_prompt_log[0].duration_ms = Date.now() - start;
+            st.llm_prompt_log[0].response_preview = JSON.stringify(result || {}).slice(0, 500);
+            st.llm_prompt_log[0].success = true;
+            ss(st);
+          }
+        } catch {}
+      }
       return result;
     } catch (e) {
       lastError = e;
@@ -82,6 +116,11 @@ async function _queryLlmOnce(providerName, providerCfg, globalCfg, prompt, timeo
     ? { model, max_tokens: maxTokens, temperature, messages: [{ role: 'user', content: prompt }] }
     : { model, max_tokens: maxTokens, temperature, messages: [{ role: 'system', content: 'You are a professional superforecaster. You estimate probabilities using base rates, evidence updates, and structured reasoning. Return ONLY valid JSON with keys: probability_yes (float 0-1), confidence (float 0-1), rationale (string with your step-by-step reasoning). No markdown, no backticks.' }, { role: 'user', content: prompt }] };
 
+  // OpenAI supports JSON mode — much more reliable than parsing markdown
+  if (providerName === 'openai' && model && !model.includes('gpt-3.5-turbo-0301')) {
+    body.response_format = { type: 'json_object' };
+  }
+
   const endpoint = providerName === 'claude' ? `${baseUrl}/messages` : `${baseUrl}/chat/completions`;
   const resp = await fetchWithRetry(endpoint, { method: 'POST', headers, body: JSON.stringify(body) }, { label: `llm_${providerName}`, retries: 1, timeoutMs });
   const payload = await resp.json();
@@ -93,10 +132,10 @@ async function _queryLlmOnce(providerName, providerCfg, globalCfg, prompt, timeo
   return parsed;
 }
 
-export async function buildLlmEnsembleEstimate(market, brief = {}, cfg = {}, providers = {}) {
+export async function buildLlmEnsembleEstimate(market, brief = {}, cfg = {}, providers = {}, state = {}) {
   if (cfg.llm_enabled === false) return { estimates: {}, notes: ['llm_disabled'] };
 
-  // Collect evidence for the prompt
+  // ═══ COLLECT ALL CONTEXT ═══
   const headlines = (brief.sources || []).filter(s => s.title && s.source_type !== 'none').slice(0, 6).map(s => `  • ${s.title} [${s.source_type}${s.domain ? ', '+s.domain : ''}]`).join('\n');
   const daysLeft = Number(market.days_to_expiry || 30);
   const endDate = market.end_date ? new Date(market.end_date).toISOString().slice(0, 10) : '';
@@ -106,50 +145,82 @@ export async function buildLlmEnsembleEstimate(market, brief = {}, cfg = {}, pro
   const marketPricePct = (Number(market.market_price || 0.5) * 100).toFixed(1);
   const catalysts = (brief.catalysts || []).slice(0, 2).map(c => `  • ${c}`).join('\n');
 
-  const prompt = `You are a professional superforecaster working at a prediction market fund. You use a rigorous, evidence-based methodology to estimate probabilities. You are known for being well-calibrated: when you say 70%, it happens 70% of the time.
+  // ═══ BUILD LEARNING CONTEXT FROM HISTORY ═══
+  const learningLines = [];
+  const closedTrades = (state.trades || []).filter(t => t.status !== 'OPEN');
+  const predictions = (state.predictions || []).slice(0, 100);
+  const brierScore = state.brier_score;
+  const compound = state.compound_summary || {};
+
+  if (closedTrades.length >= 3) {
+    const wins = closedTrades.filter(t => Number(t.netPnlUsd || 0) > 0).length;
+    const losses = closedTrades.filter(t => Number(t.netPnlUsd || 0) < 0).length;
+    const wr = (wins / closedTrades.length * 100).toFixed(0);
+    learningLines.push(`\n═══ PAST PERFORMANCE (${closedTrades.length} trades) ═══`);
+    learningLines.push(`Win Rate: ${wr}% (${wins}W/${losses}L) ${Number(wr) >= 55 ? '— performing well' : Number(wr) < 45 ? '— POOR, be more conservative' : '— average'}`);
+    if (brierScore != null) learningLines.push(`Brier Score: ${brierScore.toFixed(4)} ${brierScore < 0.2 ? '(excellent calibration)' : brierScore < 0.3 ? '(decent calibration)' : '(poor calibration — your probability estimates are off)'}`);
+    if (compound.profitFactor) learningLines.push(`Profit Factor: ${compound.profitFactor} ${Number(compound.profitFactor) >= 1.5 ? '(healthy)' : '(below target 1.5)'}`);
+
+    // Past performance for this CATEGORY
+    const catTrades = closedTrades.filter(t => t.category === category);
+    if (catTrades.length >= 2) {
+      const catWins = catTrades.filter(t => Number(t.netPnlUsd || 0) > 0).length;
+      learningLines.push(`${category} category: ${(catWins/catTrades.length*100).toFixed(0)}% WR in ${catTrades.length} trades ${(catWins/catTrades.length) < 0.45 ? '— you perform POORLY in this category, be extra cautious' : ''}`);
+    }
+
+    // Recent prediction accuracy for similar markets
+    const similarPreds = predictions.filter(p => p.source === market.platform && Math.abs(Number(p.market_prob || 0) - Number(market.market_price || 0.5)) < 0.15).slice(0, 5);
+    if (similarPreds.length >= 2) {
+      const avgEdge = similarPreds.reduce((s, p) => s + Math.abs(Number(p.edge || 0)), 0) / similarPreds.length;
+      learningLines.push(`Similar markets: avg edge was ${(avgEdge*100).toFixed(1)}%, ${similarPreds.filter(p => p.direction !== 'NO_TRADE').length}/${similarPreds.length} were actionable`);
+    }
+
+    // Known failure patterns
+    const recentLosses = closedTrades.filter(t => Number(t.netPnlUsd || 0) < 0).slice(0, 3);
+    if (recentLosses.length) {
+      learningLines.push('Recent losses (learn from these):');
+      for (const t of recentLosses) {
+        learningLines.push(`  • "${(t.title || '').slice(0, 50)}" — ${t.direction}, edge ${((t.edge || 0) * 100).toFixed(1)}% → LOSS`);
+      }
+    }
+  }
+
+  const learningContext = learningLines.join('\n');
+
+  // ═══ BUILD PROMPT ═══
+  const prompt = `You are a professional superforecaster. You estimate probabilities using base rates, evidence, and structured reasoning. You learn from your past mistakes.
 
 ═══ MARKET ═══
 Question: ${market.question}
 Category: ${category}
-Current YES price: ${marketPricePct}% (this is what the market thinks — you may disagree)
-Expires: ${daysLeft} days remaining${endDate ? ` (${endDate})` : ''}
-Volume: ${volume.toLocaleString()} contracts traded
-Spread: ${(spread * 100).toFixed(1)} cents
+Current YES price: ${marketPricePct}%
+Expires: ${daysLeft} days${endDate ? ` (${endDate})` : ''}
+Volume: ${volume.toLocaleString()} contracts | Spread: ${(spread * 100).toFixed(1)}¢
+${volume < 500 ? '⚠ LOW VOLUME — price may not reflect true probability' : ''}
 
 ═══ EVIDENCE ═══
-${headlines ? `Recent headlines:\n${headlines}` : 'No specific headlines found for this market.'}
-${catalysts ? `\nKey catalysts:\n${catalysts}` : ''}
+${headlines ? `Headlines:\n${headlines}` : 'No headlines found — use your own knowledge.'}
+${catalysts ? `\nCatalysts:\n${catalysts}` : ''}
+Sentiment: ${brief.sentiment || 'neutral'}${brief.sentiment_breakdown ? ` (${brief.sentiment_breakdown.bullish}↑ ${brief.sentiment_breakdown.bearish}↓ ${brief.sentiment_breakdown.neutral}→)` : ''}
+Evidence: ${brief.stance === 'supported' ? 'STRONG' : brief.stance === 'mixed' ? 'MIXED' : 'WEAK'}
+${brief.thesis ? `Thesis: ${brief.thesis}` : ''}
+${(brief.risks || []).length ? `Risks: ${brief.risks.join('; ')}` : ''}
+${learningContext}
 
-Sentiment analysis: ${brief.sentiment || 'neutral'}${brief.sentiment_breakdown ? ` (${brief.sentiment_breakdown.bullish} bullish / ${brief.sentiment_breakdown.bearish} bearish / ${brief.sentiment_breakdown.neutral} neutral sources)` : ''}
-Evidence quality: ${brief.stance === 'supported' ? 'Strong — multiple credible sources agree' : brief.stance === 'mixed' ? 'Mixed — sources disagree' : 'Weak — limited or no credible sources'}
-${brief.thesis ? `Research thesis: ${brief.thesis}` : ''}
-${(brief.risks || []).length ? `Known risks: ${brief.risks.join('; ')}` : ''}
+═══ ANALYSIS ═══
+1. DECOMPOSE: What must happen for YES to win?
+2. BASE RATE: How often does this type of event happen? Start HERE.
+3. EVIDENCE: Does the news shift the base rate up or down?
+4. BEST CASE YES: Strongest argument for YES?
+5. BEST CASE NO: Strongest argument for NO?
+6. MARKET CHECK: At ${marketPricePct}%, is the market right? Volume=${volume} — ${volume > 5000 ? 'high volume = smart money already priced in' : 'low volume = possible mispricing'}.
+7. TIME: ${daysLeft} days left — ${daysLeft < 3 ? 'very short, high certainty possible' : daysLeft < 14 ? 'medium term' : 'long term, more uncertainty'}.
 
-═══ YOUR ANALYSIS FRAMEWORK ═══
-Think through these steps before giving your estimate:
+═══ CALIBRATION ═══
+90-95%: Almost certain | 70-85%: Likely | 55-65%: Slight lean | 45-55%: Toss-up | <40%: Unlikely
 
-1. DECOMPOSE: What specific conditions must be true for YES to win?
-2. BASE RATE: For this type of event (${category}), how often does something like this happen? Start with that as your anchor, not the market price.
-3. EVIDENCE UPDATE: Does the news/evidence push the probability UP or DOWN from the base rate? By how much?
-4. STRONGEST CASE FOR YES: What is the single strongest argument that this will happen?
-5. STRONGEST CASE FOR NO: What is the single strongest argument that this won't happen?
-6. MARKET INTELLIGENCE: The market is at ${marketPricePct}%. Why might the market be WRONG? Consider: thin volume means less informed pricing. High volume means smart money has already priced it.
-7. TIME FACTOR: With ${daysLeft} days left, how certain can we be? More time = more uncertainty.
-
-═══ CALIBRATION GUIDE ═══
-• 90-95%: Almost certain. Only a major surprise prevents this.
-• 70-85%: Likely. The evidence clearly favors this outcome.
-• 55-65%: Lean towards yes, but significant uncertainty remains.
-• 45-55%: True toss-up. Don't pretend you know.
-• Below 40%: Evidence suggests this probably won't happen.
-
-═══ OUTPUT ═══
-Return ONLY valid JSON. No markdown, no backticks, no text outside the JSON:
-{
-  "probability_yes": 0.XX,
-  "confidence": 0.XX,
-  "rationale": "Your step-by-step reasoning in 2-4 sentences. Include: your base rate estimate, how evidence shifted it, and the key factor that determined your final number."
-}`;
+Return ONLY JSON:
+{"probability_yes": 0.XX, "confidence": 0.XX, "rationale": "2-3 sentences: base rate → evidence update → key factor"}`;
 
   const providerOrder = ['openai', 'claude', 'gemini', 'ollama_cloud', 'local_ollama', 'kimi_direct'];
   const rawWeights = { openai: Number(cfg.llm_weight_openai ?? 0.35), claude: Number(cfg.llm_weight_claude ?? 0.25), gemini: Number(cfg.llm_weight_gemini ?? 0.2), ollama_cloud: Number(cfg.llm_weight_ollama_cloud ?? 0.2), local_ollama: Number(cfg.llm_weight_local_ollama ?? 0.15), kimi_direct: Number(cfg.llm_weight_kimi ?? 0.15) };
@@ -180,7 +251,26 @@ Return ONLY valid JSON. No markdown, no backticks, no text outside the JSON:
   }
   const weightSum = active.reduce((sum, name) => sum + Math.max(0, rawWeights[name] || 0), 0) || 1;
   const weighted = active.reduce((sum, name) => { const w = Math.max(0, rawWeights[name] || 0) / weightSum; const c = confidences[name] || 0.55; return sum + (estimates[name] * w * (0.6 + c * 0.4)); }, 0);
-  return { estimates, notes, rationales, model_prob: clamp01(weighted, Number(market.market_price || 0.5)) };
+
+  // Calculate disagreement: if LLMs disagree significantly, reduce confidence or abort
+  const probs = active.map(n => estimates[n]);
+  const probMin = Math.min(...probs);
+  const probMax = Math.max(...probs);
+  const probSpread = probMax - probMin;
+  const highDisagreement = probSpread > 0.25 && active.length >= 2;
+  const criticalDisagreement = probSpread > 0.40 && active.length >= 2;
+
+  const noteOut = [...notes];
+  if (criticalDisagreement) noteOut.push(`critical_disagreement_${(probSpread*100).toFixed(0)}pct`);
+  else if (highDisagreement) noteOut.push(`high_disagreement_${(probSpread*100).toFixed(0)}pct`);
+
+  return {
+    estimates, notes: noteOut, rationales,
+    model_prob: clamp01(weighted, Number(market.market_price || 0.5)),
+    ensemble_spread: Number(probSpread.toFixed(3)),
+    disagreement: criticalDisagreement ? 'critical' : highDisagreement ? 'high' : 'low',
+    providers_count: active.length,
+  };
 }
 
 export async function runPredictStep(state = loadState()) {
@@ -211,7 +301,7 @@ export async function runPredictStep(state = loadState()) {
       gemini_bear: Math.max(0.01, Math.min(0.99, marketProb - Math.abs(narrativeGap) * 0.5 + (sentiment === 'bullish' ? 0.01 : -0.02))),
       deepseek_risk: Math.max(0.01, Math.min(0.99, marketProb + narrativeGap * 0.4 - Number(m.estimated_slippage || 0) * 0.25))
     };
-    const llmEnsemble = await buildLlmEnsembleEstimate(m, brief, cfg, state.providers || {});
+    const llmEnsemble = await buildLlmEnsembleEstimate(m, brief, cfg, state.providers || {}, state);
     const llmProvidersUsed = Object.keys(llmEnsemble.estimates || {});
     const modelProb = llmProvidersUsed.length
       ? Number(llmEnsemble.model_prob.toFixed(4))
@@ -223,10 +313,31 @@ export async function runPredictStep(state = loadState()) {
     const deltaZ = Number((stdDev > 0 ? (edge / stdDev) : 0).toFixed(4));
     const b = marketProb > 0 ? (1 / marketProb) - 1 : 0;
     const expectedValue = Number(((modelProb * b) - (1 - modelProb)).toFixed(4));
-    const confidence = Number(Math.max(0.05, Math.min(0.99, (1 - Math.min(0.5, stdDev)) * 0.55 + briefConfidence * 0.45)).toFixed(3));
-    const actionable = Math.abs(edge) >= minEdge && confidence >= minConfidence;
+    let confidence = Number(Math.max(0.05, Math.min(0.99, (1 - Math.min(0.5, stdDev)) * 0.55 + briefConfidence * 0.45)).toFixed(3));
+
+    // Penalize confidence based on LLM disagreement
+    const disagreement = llmEnsemble?.disagreement || 'low';
+    if (disagreement === 'critical') confidence = Number((confidence * 0.5).toFixed(3));
+    else if (disagreement === 'high') confidence = Number((confidence * 0.75).toFixed(3));
+
+    // Critical disagreement → never actionable (LLMs fundamentally disagree, don't trade)
+    const blockedByDisagreement = disagreement === 'critical';
+    const actionable = Math.abs(edge) >= minEdge && confidence >= minConfidence && !blockedByDisagreement;
     const direction = edge > 0 ? 'BUY_YES' : edge < 0 ? 'BUY_NO' : 'NO_TRADE';
-    predictions.push({ time: new Date().toISOString(), market_id: m.id, question: m.question, source: m.platform || 'unknown', market_prob: marketProb, model_prob: Number(modelProb.toFixed(4)), edge, expected_value: expectedValue, mispricing_zscore: deltaZ, ensemble_std_dev: Number(stdDev.toFixed(4)), llm_estimates: Object.fromEntries(Object.entries(llmEnsemble.estimates || {}).map(([k, v]) => [k, Number(v.toFixed(4))])), llm_providers_used: llmProvidersUsed, llm_notes: llmEnsemble.notes || [], llm_rationales: llmEnsemble.rationales || {}, confidence: Number(confidence.toFixed(3)), actionable, direction: actionable ? direction : 'NO_TRADE' });
+    predictions.push({
+      time: new Date().toISOString(), market_id: m.id, question: m.question,
+      source: m.platform || 'unknown', market_prob: marketProb,
+      model_prob: Number(modelProb.toFixed(4)), edge, expected_value: expectedValue,
+      mispricing_zscore: deltaZ, ensemble_std_dev: Number(stdDev.toFixed(4)),
+      ensemble_spread: llmEnsemble?.ensemble_spread || 0,
+      disagreement,
+      llm_estimates: Object.fromEntries(Object.entries(llmEnsemble.estimates || {}).map(([k, v]) => [k, Number(v.toFixed(4))])),
+      llm_providers_used: llmProvidersUsed, llm_notes: llmEnsemble.notes || [],
+      llm_rationales: llmEnsemble.rationales || {},
+      confidence, actionable,
+      direction: actionable ? direction : 'NO_TRADE',
+      blocked_by: blockedByDisagreement ? 'critical_llm_disagreement' : null,
+    });
   }
 
   if (cfg.llm_enabled !== false && cfg.llm_require_provider === true && predictions.some((p) => !(p.llm_providers_used || []).length)) {

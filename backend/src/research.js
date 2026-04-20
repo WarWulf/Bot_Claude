@@ -72,6 +72,19 @@ export async function runResearchStep() {
   const minOverlap = Math.max(1, Number(cfg.research_min_keyword_overlap || 2));
   const minCredibility = Math.max(0, Math.min(1, Number(cfg.research_min_credibility || 0.4)));
 
+  // USE LEARNED SOURCE SCORES — override defaults with what we learned
+  const learnedScores = state.source_scores || {};
+  const { getDefaultCredibility } = await import('./learningEngine.js');
+  const getDomainCredibility = (domain) => {
+    // Priority 1: learned score (blended with default tier if <20 outcomes — see learningEngine)
+    if (learnedScores[domain]?.total >= 1) return learnedScores[domain].credibility;
+    // Priority 2: tier-based default (Reuters=0.65, Reddit=0.50 etc.)
+    const tierDefault = getDefaultCredibility(domain);
+    if (tierDefault !== 0.5) return tierDefault;
+    // Priority 3: static DOMAIN_CREDIBILITY map (legacy)
+    return DOMAIN_CREDIBILITY[domain] || 0.5;
+  };
+
   // Track what we searched and where (transparency)
   const searchLog = {
     time: new Date().toISOString(),
@@ -104,7 +117,7 @@ export async function runResearchStep() {
   const headlines = (await fetchResearchHeadlines(cfg))
     .map((h) => {
       const host = (() => { try { return new URL(h.link).hostname.replace(/^www\./, ''); } catch { return ''; } })();
-      return { ...h, tokens: tokenize(h.title), domain: host, credibility: DOMAIN_CREDIBILITY[host] || 0.5, recency: recencyWeight(h.published_at) };
+      return { ...h, tokens: tokenize(h.title), domain: host, credibility: getDomainCredibility(host), recency: recencyWeight(h.published_at) };
     });
 
   searchLog.total_headlines_fetched = headlines.length;
@@ -156,21 +169,35 @@ export async function runResearchStep() {
   });
 
   state.research_briefs = briefs;
-  state.research_search_log = searchLog; // Store the search transparency log
+  state.research_search_log = searchLog;
+
+  // ═══ NEWS DIGEST LOG — lightweight, shows what was found important ═══
+  const newsDigest = headlines
+    .filter(h => h.evidence_score > 0 || briefs.some(b => (b.sources || []).some(s => s.title === h.title)))
+    .slice(0, 30)
+    .map(h => ({
+      title: h.title,
+      source: h.source_type || 'unknown',
+      domain: h.domain || '',
+      published: h.published_at || null,
+      credibility: h.credibility || 0.5,
+      matched_markets: briefs.filter(b => (b.sources || []).some(s => s.title === h.title)).map(b => b.question?.slice(0, 50)).filter(Boolean),
+      sentiment: sentimentFromText(h.title),
+    }));
+  state.news_digest = { time: new Date().toISOString(), total_fetched: headlines.length, important: newsDigest.length, items: newsDigest };
+
   const sourceDomains = new Set(briefs.flatMap((b) => (b.sources || []).map((s) => s.domain).filter(Boolean)));
   const avgConfidence = briefs.length ? briefs.reduce((sum, b) => sum + Number(b.confidence || 0), 0) / briefs.length : 0;
-  // Coverage: how many briefs have at least one real source (not 'none')
   const briefsWithSources = briefs.filter((b) => (b.sources || []).some(s => s.source_type && s.source_type !== 'none'));
   const coverage = top.length ? briefsWithSources.length / top.length : 0;
-  // Source diversity: count unique source TYPES that are active (rss, reddit, newsapi etc.)
   const activeSourceTypes = new Set(searchLog.sources_queried.map(s => s.type));
   const sourceBreakdown = briefs.flatMap((b) => b.sources || []).reduce((acc, s) => { const t = s.source_type || 'unknown'; if (t !== 'none') acc[t] = (acc[t] || 0) + 1; return acc; }, {});
   const paperReadyBriefs = briefs.filter((b) => Number(b.confidence || 0) >= 0.58 && (b.sources || []).some(s => s.source_type !== 'none')).length;
 
-  state.research_summary = { completed_at: new Date().toISOString(), analyzed_markets: briefs.length, avg_confidence: Number(avgConfidence.toFixed(3)), source_diversity: activeSourceTypes.size, matched_domains: sourceDomains.size, coverage_pct: Number((coverage * 100).toFixed(1)), source_breakdown: sourceBreakdown, paper_ready_briefs: paperReadyBriefs, paper_ready_pct: Number((briefs.length ? (paperReadyBriefs / briefs.length) * 100 : 0).toFixed(1)), search_log: searchLog, briefs_with_sources: briefsWithSources.length, briefs_without_sources: briefs.length - briefsWithSources.length };
+  state.research_summary = { completed_at: new Date().toISOString(), analyzed_markets: briefs.length, avg_confidence: Number(avgConfidence.toFixed(3)), source_diversity: activeSourceTypes.size, matched_domains: sourceDomains.size, coverage_pct: Number((coverage * 100).toFixed(1)), source_breakdown: sourceBreakdown, paper_ready_briefs: paperReadyBriefs, paper_ready_pct: Number((briefs.length ? (paperReadyBriefs / briefs.length) * 100 : 0).toFixed(1)), search_log: searchLog, briefs_with_sources: briefsWithSources.length, briefs_without_sources: briefs.length - briefsWithSources.length, news_digest_count: newsDigest.length };
   state.research_runs = state.research_runs || [];
-  state.research_runs.unshift({ time: new Date().toISOString(), analyzed: briefs.length, summary: state.research_summary });
+  state.research_runs.unshift({ time: new Date().toISOString(), analyzed: briefs.length, headlines_total: headlines.length, important_news: newsDigest.length, summary: { coverage_pct: state.research_summary.coverage_pct, avg_confidence: state.research_summary.avg_confidence, source_diversity: state.research_summary.source_diversity } });
   state.research_runs = state.research_runs.slice(0, 50);
   saveState(state);
-  return { briefs, summary: state.research_summary, runs: state.research_runs, search_log: searchLog };
+  return { briefs, summary: state.research_summary, runs: state.research_runs, search_log: searchLog, news_digest: state.news_digest };
 }

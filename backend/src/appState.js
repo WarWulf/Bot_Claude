@@ -54,13 +54,26 @@ export function defaultState() {
       scanner_http_timeout_ms: 8000,
       scanner_breaker_threshold: 3,
       scanner_breaker_cooldown_sec: 300,
-      research_rss_feeds: 'https://www.reutersagency.com/feed/?best-topics=business-finance&post_type=best,https://www.reutersagency.com/feed/?best-topics=political-general&post_type=best',
+      research_rss_feeds: [
+        'https://feeds.reuters.com/reuters/topNews',
+        'https://feeds.reuters.com/reuters/businessNews',
+        'https://feeds.bbci.co.uk/news/world/rss.xml',
+        'https://feeds.bbci.co.uk/news/business/rss.xml',
+        'https://rss.nytimes.com/services/xml/rss/nyt/Business.xml',
+        'https://www.cnbc.com/id/100003114/device/rss/rss.html',
+        'https://feeds.marketwatch.com/marketwatch/topstories',
+        'https://www.ft.com/?format=rss',
+        'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100727362',
+        'https://rss.app/feeds/v1.1/tgFMjhk7QXQlNOqd.xml',
+      ].join(','),
       research_source_rss: true,
       research_source_newsapi: false,
       research_newsapi_key: '',
-      research_newsapi_query: '(polymarket OR kalshi OR prediction market)',
+      research_newsapi_query: '(election OR federal reserve OR crypto OR bitcoin OR trade war OR GDP OR inflation OR AI OR congress)',
       research_source_gdelt: false,
-      research_gdelt_query: '(polymarket OR kalshi OR prediction market)',
+      research_gdelt_query: '(election OR federal reserve OR bitcoin OR NATO OR trade OR GDP OR inflation)',
+      research_reddit_subreddits: 'worldnews,politics,economics,CryptoCurrency,wallstreetbets,PredictionMarkets,geopolitics,technology',
+      research_reddit_query: 'election OR bitcoin OR fed OR trade OR war OR AI OR inflation OR crypto',
       research_max_headlines: 80,
       research_min_keyword_overlap: 1,
       research_min_credibility: 0.4,
@@ -88,6 +101,11 @@ export function defaultState() {
       forex_auto_enabled: false,
       forex_auto_interval_min: 5,
       forex_auto_min_score: 0.5,
+      // Realism (spread & slippage simulation)
+      forex_spread_pips: 1.5,
+      forex_slippage_pips: 0.5,
+      forex_simulate_spread: true,
+      forex_correlation_check: true,
 
       // Forex Pro (SL/TP)
       forex_pro_bankroll: 1000,
@@ -101,7 +119,10 @@ export function defaultState() {
       llm_weight_gemini: 0.2,
       llm_weight_ollama_cloud: 0.2,
       log_to_file: true,
-      log_retention_days: 14
+      log_retention_days: 14,
+      // Rate Limiting (API hardening)
+      rate_limit_enabled: false,
+      rate_limit_per_minute: 60,
     },
     providers: {
       polymarket: { wallet_address: '', eip712_signature: '', enabled: true },
@@ -175,6 +196,27 @@ export function defaultState() {
   };
 }
 
+let _backupCheckedToday = null;
+
+function _maybeBackup(state) {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    if (_backupCheckedToday === today) return;
+    _backupCheckedToday = today;
+    const backupDir = `${dirname(STATE_FILE)}/backups`;
+    mkdirSync(backupDir, { recursive: true });
+    const backupFile = `${backupDir}/state-${today}.json`;
+    if (!existsSync(backupFile)) {
+      writeFileSync(backupFile, JSON.stringify(state), 'utf8');
+      // Keep only 7 most recent
+      const files = readdirSync(backupDir).filter(f => f.startsWith('state-') && f.endsWith('.json')).sort().reverse();
+      for (const old of files.slice(7)) {
+        try { unlinkSync(`${backupDir}/${old}`); } catch {}
+      }
+    }
+  } catch {}
+}
+
 export function loadState() {
   const base = defaultState();
   if (!existsSync(STATE_FILE)) {
@@ -182,22 +224,130 @@ export function loadState() {
   }
   try {
     const loaded = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
+    _maybeBackup(loaded);
     return {
       ...base,
       ...loaded,
       config: { ...base.config, ...(loaded.config || {}) },
       providers: { ...base.providers, ...(loaded.providers || {}) }
     };
-  } catch {
+  } catch (e) {
+    console.error('[loadState] Parse error, attempting recovery:', e.message);
+    // Try recovery from most recent backup
+    try {
+      const backupDir = `${dirname(STATE_FILE)}/backups`;
+      if (existsSync(backupDir)) {
+        const files = readdirSync(backupDir).filter(f => f.startsWith('state-') && f.endsWith('.json')).sort().reverse();
+        if (files.length > 0) {
+          const latest = `${backupDir}/${files[0]}`;
+          console.log(`[loadState] Recovering from ${latest}`);
+          const recovered = JSON.parse(readFileSync(latest, 'utf8'));
+          return {
+            ...base, ...recovered,
+            config: { ...base.config, ...(recovered.config || {}) },
+            providers: { ...base.providers, ...(recovered.providers || {}) }
+          };
+        }
+      }
+    } catch {}
     return base;
   }
 }
 
-export function saveState(state) {
+// ═══ SAVE QUEUE — prevents race conditions when multiple timers save concurrently ═══
+let _saving = false;
+let _savePending = null;
+
+async function _doSave(state) {
+  // Cleanup arrays
+  if (state.logs) state.logs = state.logs.slice(0, 300);
+  if (state.scan_runs) state.scan_runs = state.scan_runs.slice(0, 50);
+  if (state.scan_audit_log) state.scan_audit_log = state.scan_audit_log.slice(0, 500);
+  if (state.research_runs) state.research_runs = state.research_runs.slice(0, 50);
+  if (state.predict_runs) state.predict_runs = state.predict_runs.slice(0, 50);
+  if (state.execution_runs) state.execution_runs = state.execution_runs.slice(0, 50);
+  if (state.risk_runs) state.risk_runs = state.risk_runs.slice(0, 50);
+  if (state.pipeline_runs) state.pipeline_runs = state.pipeline_runs.slice(0, 50);
+  if (state.nightly_reviews) state.nightly_reviews = state.nightly_reviews.slice(0, 30);
+  if (state.predictions) state.predictions = state.predictions.slice(0, 200);
+  if (state.trades) state.trades = state.trades.slice(0, 500);
+  if (state.orders) state.orders = state.orders.slice(0, 500);
+  if (state.signals) state.signals = state.signals.slice(0, 200);
+  if (state.research_briefs) state.research_briefs = state.research_briefs.slice(0, 50);
+  if (state.prediction_outcomes) state.prediction_outcomes = state.prediction_outcomes.slice(0, 200);
+  if (state.forex_trades) state.forex_trades = state.forex_trades.slice(0, 500);
+  if (state.forex_pro_trades) state.forex_pro_trades = state.forex_pro_trades.slice(0, 500);
+  if (state.forex_runs) state.forex_runs = state.forex_runs.slice(0, 50);
+  if (state.forex_signal_log) state.forex_signal_log = state.forex_signal_log.slice(0, 300);
+  if (state.forex_llm_log) state.forex_llm_log = state.forex_llm_log.slice(0, 200);
+  if (state.forex_news_history) state.forex_news_history = state.forex_news_history.slice(0, 200);
+  if (state.forex_news_trade_log) state.forex_news_trade_log = state.forex_news_trade_log.slice(0, 200);
+  if (state.llm_prompt_log) state.llm_prompt_log = state.llm_prompt_log.slice(0, 100);
+  if (state.manual_trade_plans) state.manual_trade_plans = state.manual_trade_plans.slice(0, 100);
+  if (state.news_digest?.items) state.news_digest.items = state.news_digest.items.slice(0, 30);
+  if (state.scan_history) {
+    const keys = Object.keys(state.scan_history);
+    if (keys.length > 100) {
+      const toDelete = keys.slice(100);
+      for (const k of toDelete) delete state.scan_history[k];
+    }
+    for (const k of Object.keys(state.scan_history)) {
+      const h = state.scan_history[k];
+      if (h.price_points) h.price_points = h.price_points.slice(-20);
+      if (h.volume_points) h.volume_points = h.volume_points.slice(-20);
+    }
+  }
+
   mkdirSync(dirname(STATE_FILE), { recursive: true });
   const tmpFile = `${STATE_FILE}.tmp`;
   writeFileSync(tmpFile, JSON.stringify(state, null, 2), 'utf8');
   renameSync(tmpFile, STATE_FILE);
+}
+
+export function saveState(state) {
+  // If already saving, queue this one — only latest gets saved
+  if (_saving) {
+    _savePending = state;
+    return;
+  }
+
+  _saving = true;
+  try {
+    _doSave(state);
+  } finally {
+    _saving = false;
+    // If another save was queued while we were saving, do it now
+    if (_savePending) {
+      const queued = _savePending;
+      _savePending = null;
+      saveState(queued);
+    }
+  }
+}
+
+// Debounced save — coalesces multiple calls within delayMs
+let _debounceTimer = null;
+let _debounceState = null;
+export function saveStateDebounced(state, delayMs = 2000) {
+  _debounceState = state;
+  if (_debounceTimer) return;
+  _debounceTimer = setTimeout(() => {
+    const s = _debounceState;
+    _debounceTimer = null;
+    _debounceState = null;
+    if (s) saveState(s);
+  }, delayMs);
+}
+
+export function flushDebouncedSave() {
+  if (_debounceTimer) {
+    clearTimeout(_debounceTimer);
+    _debounceTimer = null;
+    if (_debounceState) {
+      saveState(_debounceState);
+      _debounceState = null;
+    }
+  }
 }
 
 export function logLine(state, level, msg) {

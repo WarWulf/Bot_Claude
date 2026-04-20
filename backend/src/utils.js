@@ -3,11 +3,14 @@
 export const STOP_WORDS = new Set(['the', 'a', 'an', 'for', 'from', 'with', 'will', 'into', 'onto', 'about', 'this', 'that', 'next', 'above', 'below', 'over', 'under', 'and', 'oder', 'und']);
 
 export const DOMAIN_CREDIBILITY = {
-  'reutersagency.com': 0.9,
-  'reuters.com': 0.9,
-  'apnews.com': 0.85,
-  'bloomberg.com': 0.85,
-  'wsj.com': 0.8
+  'reuters.com': 0.92, 'apnews.com': 0.9, 'bloomberg.com': 0.88,
+  'wsj.com': 0.85, 'ft.com': 0.85, 'nytimes.com': 0.82,
+  'bbc.co.uk': 0.82, 'bbc.com': 0.82, 'economist.com': 0.8,
+  'cnbc.com': 0.78, 'marketwatch.com': 0.75, 'cnn.com': 0.72,
+  'theguardian.com': 0.72, 'washingtonpost.com': 0.75,
+  'politico.com': 0.78, 'axios.com': 0.74,
+  'coindesk.com': 0.7, 'theblock.co': 0.68,
+  'reddit.com': 0.45, 'twitter.com': 0.4, 'x.com': 0.4,
 };
 
 export const liveCommLog = [];
@@ -34,10 +37,72 @@ export function clamp01(value, fallback = 0.5) {
 export function extractFirstJsonObject(text = '') {
   const str = String(text || '').trim();
   if (!str) return null;
-  const start = str.indexOf('{');
-  const end = str.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-  return safeJsonParse(str.slice(start, end + 1), null);
+
+  // Strip common wrappers: markdown code fences, explanatory prefixes
+  let cleaned = str
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```\s*$/, '')
+    .replace(/^[^{[]*?(?=[{[])/, '') // drop everything before first { or [
+    .trim();
+
+  // Try direct parse
+  const direct = safeJsonParse(cleaned, null);
+  if (direct && typeof direct === 'object') return direct;
+
+  // Find balanced JSON object
+  const start = cleaned.indexOf('{');
+  if (start < 0) return null;
+  let depth = 0, inString = false, escape = false;
+  for (let i = start; i < cleaned.length; i++) {
+    const ch = cleaned[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\') { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        const parsed = safeJsonParse(cleaned.slice(start, i + 1), null);
+        if (parsed) return parsed;
+      }
+    }
+  }
+
+  // Last resort: extract key-value pairs manually with regex
+  const fallback = {};
+  const probMatch = cleaned.match(/probability[_\s]*yes[\s":]+([0-9.]+)/i);
+  if (probMatch) fallback.probability_yes = parseFloat(probMatch[1]);
+  const confMatch = cleaned.match(/confidence[\s":]+([0-9.]+)/i);
+  if (confMatch) fallback.confidence = parseFloat(confMatch[1]);
+  const takeMatch = cleaned.match(/take[_\s]*trade[\s":]+(true|false)/i);
+  if (takeMatch) fallback.take_trade = takeMatch[1].toLowerCase() === 'true';
+  const adjMatch = cleaned.match(/adjusted[_\s]*confidence[\s":]+([0-9.]+)/i);
+  if (adjMatch) fallback.adjusted_confidence = parseFloat(adjMatch[1]);
+  return Object.keys(fallback).length ? fallback : null;
+}
+
+// Simple stemmer for English — reduces words to common root
+// "elections", "elected", "electing" → "elect"
+function stem(word) {
+  if (word.length < 5) return word;
+  // Remove common suffixes
+  if (word.endsWith('ings')) return word.slice(0, -4);
+  if (word.endsWith('ings')) return word.slice(0, -4);
+  if (word.endsWith('ions')) return word.slice(0, -4);
+  if (word.endsWith('edly')) return word.slice(0, -4);
+  if (word.endsWith('ness')) return word.slice(0, -4);
+  if (word.endsWith('ment')) return word.slice(0, -4);
+  if (word.endsWith('tion')) return word.slice(0, -3);
+  if (word.endsWith('sion')) return word.slice(0, -3);
+  if (word.endsWith('ing')) return word.slice(0, -3);
+  if (word.endsWith('ies')) return word.slice(0, -3) + 'y';
+  if (word.endsWith('ied')) return word.slice(0, -3) + 'y';
+  if (word.endsWith('ed') && word.length > 5) return word.slice(0, -2);
+  if (word.endsWith('ly') && word.length > 5) return word.slice(0, -2);
+  if (word.endsWith('es') && word.length > 4) return word.slice(0, -2);
+  if (word.endsWith('s') && !word.endsWith('ss') && word.length > 3) return word.slice(0, -1);
+  return word;
 }
 
 export function tokenize(text) {
@@ -45,7 +110,8 @@ export function tokenize(text) {
     .toLowerCase()
     .replace(/[^a-z0-9\s]/gi, ' ')
     .split(/\s+/)
-    .filter((x) => x && x.length > 2 && !STOP_WORDS.has(x));
+    .filter((x) => x && x.length > 2 && !STOP_WORDS.has(x))
+    .map(stem);
 }
 
 export async function fetchWithRetry(url, options = {}, cfg = {}) {
@@ -99,12 +165,26 @@ export function recencyWeight(publishedAt) {
 
 export function sentimentFromText(text = '') {
   const t = String(text || '').toLowerCase();
-  const bullishWords = ['beat', 'win', 'surge', 'gain', 'support', 'favorable', 'strong', 'recant', 'drop charges', 'approval rises'];
-  const bearishWords = ['loss', 'fall', 'drop', 'weak', 'lawsuit', 'indict', 'recession', 'scandal', 'risk', 'denied'];
-  const bull = bullishWords.some((w) => t.includes(w));
-  const bear = bearishWords.some((w) => t.includes(w));
-  if (bull && !bear) return 'bullish';
-  if (bear && !bull) return 'bearish';
+  const bullishWords = [
+    'beat','win','surge','gain','support','favorable','strong','recant','approval rises',
+    'rally','soar','jump','boost','upgrade','outperform','bullish','optimistic','growth',
+    'exceed','surprise','recover','rebound','break through','milestone','record high',
+    'positive','confident','accelerate','expand','improve','profit','succeed','victory',
+    'pass','approve','advance','breakthrough','deal','agree','peace','resolve',
+    'hire','create jobs','cut rates','stimulus','ease','lower inflation',
+  ];
+  const bearishWords = [
+    'loss','fall','drop','weak','lawsuit','indict','recession','scandal','risk','denied',
+    'crash','plunge','decline','downgrade','underperform','bearish','pessimistic','contraction',
+    'miss','disappoint','collapse','breakdown','crisis','default','bankruptcy','warning',
+    'negative','concern','slowdown','shrink','worsen','deficit','fail','defeat',
+    'reject','veto','block','conflict','escalate','sanction','tariff','threat',
+    'layoff','cut jobs','raise rates','tighten','higher inflation','overvalued',
+  ];
+  const bull = bullishWords.filter(w => t.includes(w)).length;
+  const bear = bearishWords.filter(w => t.includes(w)).length;
+  if (bull > bear) return 'bullish';
+  if (bear > bull) return 'bearish';
   return 'neutral';
 }
 

@@ -27,12 +27,13 @@ import { resolve as resolvePath } from 'node:path';
 
 import { loadState, saveState, logLine, buildScannerHealth, maskProviderKeys, nextId, defaultState } from './appState.js';
 import { loadSkillProfiles } from './stepRegistry.js';
-import { liveCommLog } from './utils.js';
+import { liveCommLog, pushLiveComm } from './utils.js';
 import { computeBrierCalibration } from './utils.js';
 import { registerAuthRoutes } from './auth.js';
-import { scanForexSignals, FOREX_PAIRS, openForexPaperTrade, resolveForexTrades, getForexStats, fetchCandleData, analyzeForexLearning, getForexLlmOpinion, generateForexRecommendations, runForexAutoTrade, openForexProTrade, resolveForexProTrades, closeForexProTrade, getForexProStats, generateForexProRecommendations } from './forexSignals.js';
+import { scanForexSignals, FOREX_PAIRS, openForexPaperTrade, resolveForexTrades, getForexStats, fetchCandleData, analyzeForexLearning, getForexLlmOpinion, generateForexRecommendations, runForexAutoTrade, openForexProTrade, resolveForexProTrades, closeForexProTrade, getForexProStats, generateForexProRecommendations, fetchForexNews, buildForexNewsContext, persistForexNews, createManualTradePlan, reportManualTradeResult, runBacktest } from './forexSignals.js';
+import { runLearningCycle, analyzePredictionAccuracy, analyzeForexSignalAccuracy, buildFullLearningContext, updateSourceCredibility, discoverKeywordsAndSources, analyzeNewsImpact } from './learningEngine.js';
 
-// Auto-resolve forex trades every 10 seconds (both Binary + Pro)
+// Auto-resolve forex trades + learning cycle every 10 seconds
 setInterval(async () => {
   try {
     const s = loadState();
@@ -44,6 +45,15 @@ setInterval(async () => {
     if (changed) saveState(s);
   } catch {}
 }, 10000);
+
+// Learning cycle every 2 minutes — observe outcomes, rank sources, track forex signals
+setInterval(async () => {
+  try {
+    const s = loadState();
+    const results = await runLearningCycle(s);
+    if (results.observations > 0 || results.forex_resolved > 0) saveState(s);
+  } catch {}
+}, 120000);
 
 // Forex auto-trading timer
 let forexAutoTimer = null;
@@ -83,6 +93,37 @@ const execFileAsync = promisify(execFile);
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// ═══ RATE LIMITING — opt-in, simple in-memory ═══
+const rateLimitBuckets = new Map();
+function rateLimitMiddleware(req, res, next) {
+  const cfg = loadState().config || {};
+  if (!cfg.rate_limit_enabled) return next();
+  const maxPerMin = Number(cfg.rate_limit_per_minute || 60);
+  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
+  const now = Date.now();
+  const windowMs = 60 * 1000;
+  const bucket = rateLimitBuckets.get(ip) || { count: 0, resetAt: now + windowMs };
+  if (now > bucket.resetAt) { bucket.count = 0; bucket.resetAt = now + windowMs; }
+  bucket.count++;
+  rateLimitBuckets.set(ip, bucket);
+  res.setHeader('X-RateLimit-Limit', maxPerMin);
+  res.setHeader('X-RateLimit-Remaining', Math.max(0, maxPerMin - bucket.count));
+  if (bucket.count > maxPerMin) {
+    return res.status(429).json({ ok: false, error: `Rate limit: max ${maxPerMin} Anfragen pro Minute. Reset in ${Math.ceil((bucket.resetAt - now) / 1000)}s.` });
+  }
+  next();
+}
+
+// Cleanup old buckets every 5 min
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, bucket] of rateLimitBuckets.entries()) {
+    if (now > bucket.resetAt) rateLimitBuckets.delete(ip);
+  }
+}, 5 * 60 * 1000);
+
+app.use(rateLimitMiddleware);
 const port = Number(process.env.PORT || 8080);
 
 // Initialize state
@@ -103,6 +144,52 @@ app.get('/api/state', (_, res) => {
   state.websocket = websocketState;
   state.step_status = computeStepStatus(state);
   res.json(maskProviderKeys(state));
+});
+
+// Health check — for external monitoring (UptimeRobot, Grafana, etc.)
+app.get('/health', (_, res) => {
+  try {
+    const s = loadState();
+    const openBinary = (s.forex_trades || []).filter(t => t.status === 'OPEN').length;
+    const openPro = (s.forex_pro_trades || []).filter(t => t.status === 'OPEN').length;
+    const openPm = (s.trades || []).filter(t => t.status === 'OPEN' || t.status === 'FILLED').length;
+    const todayKey = new Date().toISOString().slice(0, 10);
+    const quota = s.api_quota?.twelvedata?.date === todayKey ? s.api_quota.twelvedata.count : 0;
+    const lastLlm = (s.llm_prompt_log || [])[0];
+    const lastLlmAge = lastLlm ? Math.floor((Date.now() - new Date(lastLlm.time).getTime()) / 1000) : null;
+    res.json({
+      status: 'ok',
+      uptime_sec: Math.floor(process.uptime()),
+      memory_mb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+      bankroll: { pm: s.bankroll || 0, forex: s.forex_bankroll || 0, forex_pro: s.forex_pro_bankroll || 0 },
+      open_trades: { pm: openPm, forex_binary: openBinary, forex_pro: openPro },
+      total_trades: {
+        pm: (s.trades || []).length,
+        forex_binary: (s.forex_trades || []).length,
+        forex_pro: (s.forex_pro_trades || []).length,
+      },
+      api_quota: { twelvedata: { used: quota, limit: 800, pct: Math.round(quota / 800 * 100) } },
+      last_llm_request_sec_ago: lastLlmAge,
+      last_llm_success: lastLlm?.success ?? null,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.status(500).json({ status: 'error', error: e.message });
+  }
+});
+
+// API Quota status endpoint
+app.get('/api/quota', (_, res) => {
+  const s = loadState();
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const q = s.api_quota || {};
+  const result = {};
+  for (const [provider, data] of Object.entries(q)) {
+    if (data.date !== todayKey) { result[provider] = { used: 0, date: todayKey }; continue; }
+    const limit = provider === 'twelvedata' ? 800 : provider === 'alphavantage' ? 500 : 1000;
+    result[provider] = { used: data.count, limit, pct: Math.round(data.count / limit * 100), date: data.date, warning: data.count >= limit * 0.8, exhausted: data.count >= limit };
+  }
+  res.json(result);
 });
 
 // --- Scan ---
@@ -153,6 +240,7 @@ app.get('/api/scan/live-log', (_, res) => { const latest = liveCommLog[0] || nul
 // --- Research ---
 app.post('/api/research/run', async (_, res) => { try { res.json({ ok: true, ...await runResearchStep() }); } catch (e) { res.status(500).json({ ok: false, message: e.message }); } });
 app.get('/api/research/status', (_, res) => { const s = loadState(); res.json({ summary: s.research_summary || {}, briefs: (s.research_briefs || []).slice(0, 20) }); });
+app.get('/api/news/digest', (_, res) => { const s = loadState(); res.json(s.news_digest || { items: [] }); });
 app.get('/api/research/test-sources', async (_, res) => {
   const state = loadState(); const cfg = state.config || {}; const results = {};
   // Test RSS
@@ -375,14 +463,87 @@ app.get('/api/forex/learning', (_, res) => {
   res.json(analyzeForexLearning(s));
 });
 
+// ═══ LEARNING & INTELLIGENCE ═══
+app.get('/api/learning/status', (_, res) => {
+  const s = loadState();
+  const discoveries = discoverKeywordsAndSources(s);
+  res.json({
+    pm_accuracy: analyzePredictionAccuracy(s),
+    forex_signal_accuracy: analyzeForexSignalAccuracy(s),
+    news_impact: analyzeNewsImpact(s),
+    source_ranking: s.source_ranking || [],
+    source_scores: s.source_scores || {},
+    signal_log_count: (s.forex_signal_log || []).length,
+    news_history_count: (s.forex_news_history || []).length,
+    news_trade_log_count: (s.forex_news_trade_log || []).length,
+    discoveries,
+  });
+});
+
+app.post('/api/learning/run', async (_, res) => {
+  try {
+    const s = loadState();
+    const results = await runLearningCycle(s);
+    const discoveries = discoverKeywordsAndSources(s);
+    saveState(s);
+    res.json({ ok: true, ...results, pm_accuracy: analyzePredictionAccuracy(s), forex_accuracy: analyzeForexSignalAccuracy(s), discoveries });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 app.post('/api/forex/llm-opinion', async (req, res) => {
   try {
     const { signal } = req.body || {};
     if (!signal) return res.status(400).json({ ok: false, error: 'signal required' });
     const s = loadState();
-    const result = await getForexLlmOpinion(signal, s);
+    let newsCtx = '';
+    try {
+      const news = await fetchForexNews(s.config || {}, { fetchBodies: true, state: s });
+      s.forex_news = news;
+      persistForexNews(s, news);
+      newsCtx = buildForexNewsContext(news, signal.symbol);
+    } catch (e) { pushLiveComm('forex_news_fetch_error', { where: 'llm-opinion', error: e.message }); }
+    const result = await getForexLlmOpinion(signal, s, newsCtx);
+    saveState(s);
     res.json({ ok: true, ...result });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.get('/api/forex/news', async (_, res) => {
+  try {
+    const s = loadState();
+    // Bot decides automatically whether to fetch bodies (HIGH IMPACT detection)
+    const news = await fetchForexNews(s.config || {}, { state: s });
+    s.forex_news = news;
+    persistForexNews(s, news);
+    saveState(s);
+    res.json({ ok: true, ...news, history_count: (s.forex_news_history || []).length });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.get('/api/forex/news/history', (_, res) => {
+  const s = loadState();
+  res.json({
+    total: (s.forex_news_history || []).length,
+    items: (s.forex_news_history || []).slice(0, 100),
+  });
+});
+
+// LLM Prompt Log — see exactly what was sent to each LLM
+app.get('/api/llm/prompts', (req, res) => {
+  const s = loadState();
+  const limit = Math.min(50, Number(req.query?.limit || 20));
+  res.json({
+    total: (s.llm_prompt_log || []).length,
+    items: (s.llm_prompt_log || []).slice(0, limit),
+  });
+});
+
+app.get('/api/llm/prompts/:index', (req, res) => {
+  const s = loadState();
+  const idx = Number(req.params.index);
+  const entry = (s.llm_prompt_log || [])[idx];
+  if (!entry) return res.status(404).json({ ok: false, error: 'Not found' });
+  res.json(entry);
 });
 
 app.post('/api/forex/reset', (_, res) => {
@@ -394,16 +555,81 @@ app.post('/api/forex/reset', (_, res) => {
   res.json({ ok: true, previous_trades: prev, bankroll: s.forex_bankroll });
 });
 
-// Recommendations — smart signals with position sizing + learning
+// ═══ MANUAL TRADE MODE — Bot plans trade, user executes externally, reports back ═══
+app.post('/api/forex/manual/plan', async (req, res) => {
+  try {
+    const { symbol, direction, signal_data } = req.body || {};
+    if (!symbol || !direction) return res.status(400).json({ ok: false, error: 'symbol + direction required' });
+    const s = loadState();
+    // Fetch FRESH price to avoid stale signal (fix #21)
+    let freshPrice = null;
+    try {
+      const candles = await fetchCandleData(symbol, '1min', 2);
+      freshPrice = candles[candles.length - 1]?.close || null;
+    } catch (e) { pushLiveComm('price_fetch_error', { symbol, error: e.message }); }
+    const plan = createManualTradePlan(s, { symbol, direction, signal_data, current_price_fresh: freshPrice });
+    saveState(s);
+    res.json({ ok: true, plan });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/forex/manual/result', (req, res) => {
+  try {
+    const { plan_id, amount, duration_min, result, entry_price, exit_price, entry_time, payout_pct } = req.body || {};
+    if (!plan_id || !result) return res.status(400).json({ ok: false, error: 'plan_id + result required' });
+    if (!['WIN', 'LOSS', 'DRAW'].includes(result)) return res.status(400).json({ ok: false, error: 'result must be WIN/LOSS/DRAW' });
+    const s = loadState();
+    const out = reportManualTradeResult(s, plan_id, { amount, duration_min, result, entry_price, exit_price, entry_time, payout_pct });
+    if (!out.ok) return res.status(400).json(out);
+    saveState(s);
+    res.json(out);
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.get('/api/forex/manual/plans', (_, res) => {
+  const s = loadState();
+  res.json({ plans: (s.manual_trade_plans || []).slice(0, 50) });
+});
+
+app.post('/api/forex/manual/cancel', (req, res) => {
+  const { plan_id } = req.body || {};
+  const s = loadState();
+  const plan = (s.manual_trade_plans || []).find(p => p.id === plan_id);
+  if (!plan) return res.status(404).json({ ok: false, error: 'Nicht gefunden' });
+  plan.status = 'CANCELLED';
+  plan.cancelled_at = new Date().toISOString();
+  saveState(s);
+  res.json({ ok: true, plan });
+});
+
+// Backtest — replay strategy on historical candles
+app.post('/api/forex/backtest', async (req, res) => {
+  try {
+    const { symbol, interval, candles_count, duration_min } = req.body || {};
+    if (!symbol) return res.status(400).json({ ok: false, error: 'symbol required' });
+    const s = loadState();
+    const result = await runBacktest(s, {
+      symbol,
+      interval: interval || '5min',
+      candles_count: Math.min(500, Number(candles_count || 200)),
+      duration_min: Number(duration_min || 3),
+    });
+    res.json(result);
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// Recommendations — smart signals with position sizing + learning + news
 app.post('/api/forex/recommendations', async (req, res) => {
   try {
     const s = loadState();
     const interval = req.body?.interval || s.config?.forex_interval || '5min';
     const scanResult = await scanForexSignals(null, interval);
     s.forex_signals = scanResult;
+    // Fetch news for context
+    try { s.forex_news = await fetchForexNews(s.config || {}, { state: s }); persistForexNews(s, s.forex_news); } catch (e) { pushLiveComm('forex_news_fetch_error', { where: 'recommendations', error: e.message }); }
     const recs = generateForexRecommendations(scanResult.signals, s);
     saveState(s);
-    res.json({ ok: true, ...recs });
+    res.json({ ok: true, ...recs, news_available: !!(s.forex_news?.forex_relevant) });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
@@ -743,7 +969,27 @@ ensureScanScheduler();
 ensurePipelineScheduler();
 applyWebsocketConfig();
 setInterval(flushWsTicksBuffer, 2000);
-app.listen(port, () => console.log(`Backend listening on http://0.0.0.0:${port}`));
+app.listen(port, async () => {
+  console.log(`Backend listening on http://0.0.0.0:${port}`);
+  // On startup: resolve any open forex trades whose expires_at has already passed
+  try {
+    const s = loadState();
+    const now = Date.now();
+    const expiredBinary = (s.forex_trades || []).filter(t => t.status === 'OPEN' && new Date(t.expires_at).getTime() < now);
+    if (expiredBinary.length > 0) {
+      console.log(`[startup] Resolving ${expiredBinary.length} expired binary trades...`);
+      await resolveForexTrades(s);
+    }
+    const openPro = (s.forex_pro_trades || []).filter(t => t.status === 'OPEN').length;
+    if (openPro > 0) {
+      console.log(`[startup] Checking ${openPro} open pro trades...`);
+      await resolveForexProTrades(s);
+    }
+    saveState(s);
+  } catch (e) {
+    console.error('[startup] Error resolving open trades:', e.message);
+  }
+});
 
 // Compound/Learning step: analyze results and write lessons
 async function runCompoundStep() {
@@ -809,6 +1055,17 @@ async function runCompoundStep() {
 
   // Recalculate Brier Score
   recalcBrierScore(state);
+
+  // Run learning cycle — observe outcomes, rank sources
+  try {
+    await runLearningCycle(state);
+    const accuracy = analyzePredictionAccuracy(state);
+    if (accuracy.ready) {
+      state.compound_summary.prediction_accuracy = accuracy.accuracy_pct;
+      state.compound_summary.missed_winners = accuracy.missed_winners;
+      state.compound_summary.source_ranking = (state.source_ranking || []).slice(0, 5);
+    }
+  } catch (e) { logLine(state, 'warning', `compound learning error: ${e.message}`); }
   state.compound_summary.brier_score = state.brier_score;
   state.compound_summary.brier_samples = state.brier_samples;
 

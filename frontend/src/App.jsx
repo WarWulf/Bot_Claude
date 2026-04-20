@@ -21,6 +21,32 @@ function ForexDashboard({cfg,apiFetch,act,busy,setMsg,forexSignals,setForexSigna
   const [llmOpinions,setLlmOpinions]=React.useState({});
   const [recs,setRecs]=React.useState(null);
   const [autoMode,setAutoMode]=React.useState(!!cfg.forex_auto_enabled);
+  const [news,setNews]=React.useState(null);
+  const [manualPlans,setManualPlans]=React.useState([]);
+  const [manualReport,setManualReport]=React.useState({planId:null,amount:'',duration:'',result:'',entryPrice:'',exitPrice:'',payoutPct:''});
+  const [backtest,setBacktest]=React.useState(null);
+  const [btSymbol,setBtSymbol]=React.useState('EUR/USD');
+
+  const loadPlans=React.useCallback(async()=>{try{const r=await apiFetch('/api/forex/manual/plans');const d=await r.json();setManualPlans(d.plans||[]);}catch{}},[apiFetch]);
+  React.useEffect(()=>{loadPlans();const t=setInterval(loadPlans,10000);return()=>clearInterval(t);},[loadPlans]);
+
+  const createPlan=async(sig)=>{
+    const r=await apiFetch('/api/forex/manual/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sig.symbol,direction:sig.direction,signal_data:sig})});
+    const d=await r.json();
+    if(!d.ok)throw new Error(d.error);
+    setMsg(`✅ Plan erstellt: ${d.plan.direction} ${d.plan.symbol} $${d.plan.recommended_amount} für ${d.plan.recommended_duration_min} Min. Gültig bis ${d.plan.valid_until_time}`);
+    loadPlans();
+  };
+
+  const submitResult=async()=>{
+    if(!manualReport.planId||!manualReport.result){setMsg('❌ Plan und Ergebnis auswählen!');return;}
+    const r=await apiFetch('/api/forex/manual/result',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plan_id:manualReport.planId,amount:Number(manualReport.amount)||undefined,duration_min:Number(manualReport.duration)||undefined,result:manualReport.result,entry_price:Number(manualReport.entryPrice)||undefined,exit_price:Number(manualReport.exitPrice)||undefined,payout_pct:manualReport.payoutPct!==''?Number(manualReport.payoutPct):undefined})});
+    const d=await r.json();
+    if(!d.ok){setMsg(`❌ ${d.error}`);return;}
+    setMsg(`✅ Ergebnis gespeichert (Payout ${d.payout_used}%) — neue Bankroll: $${d.new_bankroll}`);
+    setManualReport({planId:null,amount:'',duration:'',result:'',entryPrice:'',exitPrice:'',payoutPct:''});
+    loadPlans();refresh();
+  };
   const refresh=React.useCallback(async()=>{try{const r=await apiFetch('/api/forex/stats');const d=await r.json();setStats(d);setTrades(d?.open||[]);}catch{}},[apiFetch]);
   React.useEffect(()=>{refresh();const t=setInterval(refresh,5000);return()=>clearInterval(t);},[refresh]);
   const doTrade=async(symbol,direction,signalData,recAmount,recDuration)=>{
@@ -95,7 +121,7 @@ function ForexDashboard({cfg,apiFetch,act,busy,setMsg,forexSignals,setForexSigna
           </div>
           <div style={{textAlign:'right',fontSize:10,...mono}}>
             <div style={{color:C.cyan}}>💰 ${t.amount} — Einstieg: {t.entry_price?.toFixed(5)}</div>
-            <div style={{color:t.remaining_sec<=10?C.red:C.amber}}>⏱ noch {t.remaining_sec}s</div>
+            <div style={{color:(t.remaining_sec||0)<=10?C.red:C.amber}}>⏱ noch {t.remaining_sec!=null?`${t.remaining_sec}s`:'...'}</div>
           </div>
         </div>)}
       </div>}
@@ -149,6 +175,7 @@ function ForexDashboard({cfg,apiFetch,act,busy,setMsg,forexSignals,setForexSigna
               {rec.direction==='CALL'?'📈':'📉'} {rec.direction} ${rec.recommended_amount} für {rec.recommended_duration}min
             </Btn>
             <Btn onClick={()=>act('fxLlm'+i,async()=>{const fullSig=forexSignals.find(s=>s.symbol===rec.symbol);if(fullSig)await askLlm(fullSig,i);})} busy={busy['fxLlm'+i]} style={{background:`${C.purple}22`,color:C.purple,border:`1px solid ${C.purple}44`}}>🤖 KI fragen</Btn>
+            <Btn onClick={()=>act('fxPlan'+i,async()=>{const fullSig=forexSignals.find(s=>s.symbol===rec.symbol)||{symbol:rec.symbol,direction:rec.direction,confidence:rec.score,current_price:rec.current_price};await createPlan(fullSig);})} busy={busy['fxPlan'+i]} style={{background:`${C.cyan}22`,color:C.cyan,border:`1px solid ${C.cyan}44`}}>📝 Plan</Btn>
           </div>
 
           {/* LLM Opinion */}
@@ -163,6 +190,152 @@ function ForexDashboard({cfg,apiFetch,act,busy,setMsg,forexSignals,setForexSigna
 
       {recs&&!recs.recommendations.length&&<div style={{color:C.muted,fontSize:11,padding:6}}>Keine Signale gefunden. Markt geschlossen oder alle Paare neutral.</div>}
       {!recs&&<div style={{color:C.muted,fontSize:11,padding:6}}>Klicke "🎯 Jetzt analysieren" für Empfehlungen.</div>}
+    </Card>
+
+    {/* Forex News Intelligence */}
+    <Card title="📰 Forex News" help="Nachrichten von 6 Forex-Quellen: ForexLive, FXStreet, DailyFX, Reuters Business, BBC Business, CNBC. Headlines werden automatisch zu Währungen gematcht und in der KI-Analyse berücksichtigt. Bis zu 200 Headlines werden im Gedächtnis gespeichert.">
+      <div style={{display:'flex',gap:6,marginBottom:8}}>
+        <Btn onClick={()=>act('fxNews',async()=>{const r=await apiFetch('/api/forex/news');const d=await r.json();setNews(d);setMsg(`📰 ${d.forex_relevant||0}/${d.total_fetched||0} relevante News (${d.history_count||0} im Gedächtnis)`);})} busy={busy.fxNews} style={{fontSize:10}}>📰 News scannen</Btn>
+        <Btn onClick={()=>act('fxNewsHist',async()=>{const r=await apiFetch('/api/forex/news/history');const d=await r.json();setNews({top_headlines:d.items,total_fetched:d.total,forex_relevant:d.total,from_history:true});setMsg(`📚 ${d.total} Headlines im Gedächtnis`);})} busy={busy.fxNewsHist} style={{fontSize:10}}>📚 Gedächtnis ({news?.history_count||'?'})</Btn>
+      </div>
+
+      {news?.feeds_queried&&<div style={{display:'flex',flexWrap:'wrap',gap:4,marginBottom:8,fontSize:9,...mono}}>
+        {Object.entries(news.feeds_queried).map(([name,s])=><span key={name} style={{color:s.ok?C.green:C.red,padding:'1px 6px',borderRadius:4,background:s.ok?`${C.green}10`:`${C.red}10`}}>
+          {s.ok?'✓':'✗'} {name} {s.ok?`(${s.count})`:''}
+        </span>)}
+      </div>}
+
+      {news?.currency_sentiment&&Object.keys(news.currency_sentiment).length>0&&<div style={{marginBottom:8,padding:'6px 8px',background:C.bg,borderRadius:6,fontSize:10,...mono}}>
+        <div style={{fontSize:10,fontWeight:600,color:C.muted,marginBottom:3}}>Währungs-Sentiment:</div>
+        {Object.entries(news.currency_sentiment).map(([ccy,s])=>{
+          const total=s.bullish+s.bearish+s.neutral;
+          const bias=s.bullish>s.bearish?'BULLISH':s.bearish>s.bullish?'BEARISH':'NEUTRAL';
+          const color=bias==='BULLISH'?C.green:bias==='BEARISH'?C.red:C.muted;
+          return <span key={ccy} style={{color,marginRight:10}}>{ccy}: {bias} ({s.bullish}↑/{s.bearish}↓/{s.neutral}→ von {total})</span>;
+        })}
+      </div>}
+
+      {news?.top_headlines?.length>0&&<div style={{maxHeight:250,overflow:'auto'}}>
+        {news.from_history&&<div style={{fontSize:9,...mono,color:C.cyan,marginBottom:4}}>📚 Aus Gedächtnis ({news.total_fetched} Headlines)</div>}
+        {news.top_headlines.map((h,i)=><div key={i} style={{padding:'3px 0',borderBottom:`1px solid ${C.border}11`,fontSize:10,...mono}}>
+          <div>
+            <span style={{color:h.sentiment==='bullish'?C.green:h.sentiment==='bearish'?C.red:C.muted}}>{h.sentiment==='bullish'?'↑':h.sentiment==='bearish'?'↓':'→'}</span>
+            {h.impact==='HIGH'&&<span style={{color:C.amber,marginLeft:4}}>⚡</span>}
+            <span style={{color:C.text,marginLeft:4}}>{h.title?.slice(0,80)}</span>
+          </div>
+          <div style={{marginLeft:16,fontSize:9,color:C.dim}}>
+            {h.source||'rss'} {h.currencies?.length>0&&<span style={{color:C.cyan}}>[{h.currencies.join(',')}]</span>}
+            {h.published&&<span style={{marginLeft:6}}>· {new Date(h.published).toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</span>}
+          </div>
+        </div>)}
+      </div>}
+
+      {news&&!news.top_headlines?.length&&<div style={{color:C.muted,fontSize:10}}>Keine relevanten Forex-News.</div>}
+      {!news&&<div style={{color:C.muted,fontSize:10}}>Klicke "📰 News scannen". News werden auch automatisch bei "🤖 KI fragen" geladen und im Gedächtnis gespeichert.</div>}
+    </Card>
+
+    {/* Manual Trade Mode — Bot plans, you trade externally, report back */}
+    <Card title="📝 Manuelles Trading" help="Der Bot analysiert ein Signal und sagt dir: Einsatz, Dauer, Richtung, Zeitfenster. Du tradest auf deiner Broker-Plattform. Nach Abschluss meldest du das Ergebnis — Bot updated Bankroll und lernt daraus." accent={C.purple}>
+      <div style={{fontSize:10,color:C.muted,marginBottom:8}}>Unten bei den Signalen "📝 Plan" klicken. Der Plan erscheint hier. Nach dem externen Trade: Ergebnis melden.</div>
+
+      {manualPlans.filter(p=>p.status==='PENDING').length>0&&<div style={{marginBottom:10}}>
+        <div style={{fontSize:11,fontWeight:600,color:C.amber,marginBottom:4}}>🟡 Offene Pläne ({manualPlans.filter(p=>p.status==='PENDING').length})</div>
+        {manualPlans.filter(p=>p.status==='PENDING').map(p=>{
+          const now=Date.now();
+          const validUntilMs=new Date(p.valid_until).getTime();
+          const expired=now>validUntilMs;
+          return <div key={p.id} style={{padding:'8px 10px',background:expired?`${C.red}08`:`${C.amber}08`,borderRadius:6,border:`1px solid ${expired?C.red:C.amber}33`,marginBottom:6}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
+              <div>
+                <span style={{fontSize:14,fontWeight:700,color:p.direction==='CALL'?C.green:C.red}}>{p.direction==='CALL'?'📈':'📉'} {p.direction}</span>
+                <span style={{fontSize:13,fontWeight:600,marginLeft:8}}>{p.symbol}</span>
+                <span style={{fontSize:11,color:C.muted,marginLeft:8,...mono}}>@ {p.current_price?Number(p.current_price).toFixed(5):'?'}</span>
+              </div>
+              <Btn onClick={()=>act('cancel'+p.id,async()=>{await apiFetch('/api/forex/manual/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plan_id:p.id})});loadPlans();})} style={{fontSize:9,padding:'2px 6px',background:C.red+'20',color:C.red}}>✗ Abbrechen</Btn>
+            </div>
+            <div style={{fontSize:10,...mono,color:C.text,display:'flex',gap:12,flexWrap:'wrap',marginBottom:4}}>
+              <span>💰 <span style={{color:C.cyan,fontWeight:700}}>${p.recommended_amount}</span></span>
+              <span>⏱️ <span style={{color:C.cyan,fontWeight:700}}>{p.recommended_duration_min} Min</span></span>
+              <span>📊 Confidence: <span style={{color:C.cyan}}>{p.signal_confidence?(p.signal_confidence*100).toFixed(0):'?'}%</span></span>
+              <span>💪 {p.signal_strength}</span>
+            </div>
+            <div style={{fontSize:10,...mono,color:expired?C.red:C.amber,marginBottom:4}}>
+              🕐 Gültig: {p.valid_from_time} bis <strong>{p.valid_until_time}</strong> {expired?' ⚠ ABGELAUFEN':` (noch ${Math.max(0,Math.ceil((validUntilMs-now)/1000))}s)`}
+            </div>
+            <div style={{fontSize:9,color:C.muted,marginBottom:6,fontStyle:'italic'}}>{p.instructions}</div>
+
+            <Btn onClick={()=>setManualReport({planId:p.id,amount:String(p.recommended_amount),duration:String(p.recommended_duration_min),result:'',entryPrice:'',exitPrice:'',payoutPct:String(cfg.forex_payout_pct||85)})} style={{fontSize:10,padding:'4px 10px',width:'100%',background:manualReport.planId===p.id?C.cyan:C.blue+'40',color:manualReport.planId===p.id?'#000':C.cyan}}>
+              {manualReport.planId===p.id?'✓ Ausgewählt':'📋 Ergebnis eintragen'}
+            </Btn>
+          </div>;
+        })}
+      </div>}
+
+      {manualReport.planId&&<div style={{padding:'8px 10px',background:C.bg,borderRadius:6,border:`2px solid ${C.cyan}`,marginBottom:8}}>
+        <div style={{fontSize:11,fontWeight:600,color:C.cyan,marginBottom:6}}>📊 Ergebnis melden für Plan {manualReport.planId.slice(-6)}</div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,marginBottom:6}}>
+          <div><div style={{fontSize:9,color:C.muted,marginBottom:2}}>Tatsächl. Einsatz ($)</div><input type="number" value={manualReport.amount} onChange={e=>setManualReport({...manualReport,amount:e.target.value})} style={{width:'100%',padding:'4px 6px',background:C.card,border:`1px solid ${C.border}`,borderRadius:4,color:C.text,...mono,fontSize:11}}/></div>
+          <div><div style={{fontSize:9,color:C.muted,marginBottom:2}}>Tatsächl. Dauer (Min)</div><input type="number" value={manualReport.duration} onChange={e=>setManualReport({...manualReport,duration:e.target.value})} style={{width:'100%',padding:'4px 6px',background:C.card,border:`1px solid ${C.border}`,borderRadius:4,color:C.text,...mono,fontSize:11}}/></div>
+          <div><div style={{fontSize:9,color:C.muted,marginBottom:2}}>💰 Payout % (0-92)</div><input type="number" min="0" max="92" step="0.5" value={manualReport.payoutPct} placeholder={String(cfg.forex_payout_pct||85)} onChange={e=>setManualReport({...manualReport,payoutPct:e.target.value})} style={{width:'100%',padding:'4px 6px',background:C.card,border:`1px solid ${C.cyan}66`,borderRadius:4,color:C.text,...mono,fontSize:11}}/></div>
+          <div style={{display:'flex',alignItems:'flex-end'}}>
+            <div style={{fontSize:10,...mono,color:C.muted,paddingBottom:4}}>
+              {manualReport.amount&&manualReport.payoutPct&&manualReport.result==='WIN'?<span style={{color:C.green}}>+${(Number(manualReport.amount)*Number(manualReport.payoutPct)/100).toFixed(2)}</span>:manualReport.amount&&manualReport.result==='LOSS'?<span style={{color:C.red}}>-${Number(manualReport.amount).toFixed(2)}</span>:manualReport.result==='DRAW'?<span style={{color:C.amber}}>$0.00</span>:'→ Ergebnis wählen'}
+            </div>
+          </div>
+          <div><div style={{fontSize:9,color:C.muted,marginBottom:2}}>Entry Preis (optional)</div><input type="number" step="0.00001" value={manualReport.entryPrice} onChange={e=>setManualReport({...manualReport,entryPrice:e.target.value})} style={{width:'100%',padding:'4px 6px',background:C.card,border:`1px solid ${C.border}`,borderRadius:4,color:C.text,...mono,fontSize:11}}/></div>
+          <div><div style={{fontSize:9,color:C.muted,marginBottom:2}}>Exit Preis (optional)</div><input type="number" step="0.00001" value={manualReport.exitPrice} onChange={e=>setManualReport({...manualReport,exitPrice:e.target.value})} style={{width:'100%',padding:'4px 6px',background:C.card,border:`1px solid ${C.border}`,borderRadius:4,color:C.text,...mono,fontSize:11}}/></div>
+        </div>
+        <div style={{display:'flex',gap:6,marginBottom:6}}>
+          <Btn onClick={()=>setManualReport({...manualReport,result:'WIN'})} style={{flex:1,padding:'6px',background:manualReport.result==='WIN'?C.green:C.green+'20',color:manualReport.result==='WIN'?'#000':C.green,fontWeight:700}}>✅ WIN</Btn>
+          <Btn onClick={()=>setManualReport({...manualReport,result:'LOSS'})} style={{flex:1,padding:'6px',background:manualReport.result==='LOSS'?C.red:C.red+'20',color:manualReport.result==='LOSS'?'#000':C.red,fontWeight:700}}>❌ LOSS</Btn>
+          <Btn onClick={()=>setManualReport({...manualReport,result:'DRAW'})} style={{flex:1,padding:'6px',background:manualReport.result==='DRAW'?C.amber:C.amber+'20',color:manualReport.result==='DRAW'?'#000':C.amber,fontWeight:700}}>➖ DRAW</Btn>
+        </div>
+        <div style={{display:'flex',gap:6}}>
+          <Btn onClick={submitResult} style={{flex:1,padding:'6px',background:C.cyan,color:'#000',fontWeight:700}}>💾 Speichern</Btn>
+          <Btn onClick={()=>setManualReport({planId:null,amount:'',duration:'',result:'',entryPrice:'',exitPrice:''})} style={{padding:'6px 12px',background:C.dim,color:C.muted}}>Abbrechen</Btn>
+        </div>
+      </div>}
+
+      {/* History — reported trades */}
+      {manualPlans.filter(p=>p.status==='RESULT_REPORTED').length>0&&<div>
+        <div style={{fontSize:10,fontWeight:600,color:C.muted,marginBottom:4}}>📜 Historie (letzte {Math.min(5,manualPlans.filter(p=>p.status==='RESULT_REPORTED').length)})</div>
+        {manualPlans.filter(p=>p.status==='RESULT_REPORTED').slice(0,5).map(p=><div key={p.id} style={{padding:'3px 6px',fontSize:10,...mono,display:'flex',justifyContent:'space-between',borderBottom:`1px solid ${C.border}11`}}>
+          <span><span style={{color:p.actual_result==='WIN'?C.green:p.actual_result==='LOSS'?C.red:C.amber}}>{p.actual_result==='WIN'?'✅':p.actual_result==='LOSS'?'❌':'➖'} {p.direction}</span> {p.symbol} ${p.actual_amount} {p.actual_duration_min}min</span>
+          <span style={{color:p.actual_pnl>=0?C.green:C.red}}>{p.actual_pnl>=0?'+':''}${Number(p.actual_pnl).toFixed(2)}</span>
+        </div>)}
+      </div>}
+
+      {manualPlans.length===0&&<div style={{color:C.muted,fontSize:11,padding:'8px 0'}}>Keine Pläne. Klicke bei einem Signal unten auf "📝 Plan".</div>}
+    </Card>
+
+    {/* Backtest — test strategy on historical data */}
+    <Card title="⏪ Backtest" help="Testet die Strategie (RSI<30+Trend=CALL, RSI>70+Trend=PUT) auf historischen Kerzen. Zeigt Win Rate, PnL und Drawdown aus der Vergangenheit. Achtung: Vergangenheit garantiert keine Zukunft.">
+      <div style={{display:'flex',gap:6,marginBottom:8,flexWrap:'wrap',alignItems:'center'}}>
+        <select value={btSymbol} onChange={e=>setBtSymbol(e.target.value)} style={{padding:'4px 8px',background:C.card,border:`1px solid ${C.border}`,borderRadius:4,color:C.text,...mono,fontSize:11}}>
+          {(cfg.forex_pairs||'EUR/USD,GBP/USD,USD/JPY,AUD/USD').split(',').map(p=><option key={p} value={p.trim()}>{p.trim()}</option>)}
+        </select>
+        <Btn onClick={()=>act('backtest',async()=>{const r=await apiFetch('/api/forex/backtest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:btSymbol,interval:cfg.forex_interval||'5min',candles_count:200,duration_min:Number(cfg.forex_default_duration||3)})});const d=await r.json();setBacktest(d);if(!d.ok)setMsg(`❌ ${d.error}`);else setMsg(`⏪ Backtest: ${d.total_trades} Trades, ${d.win_rate}% WR, ${d.total_pnl>=0?'+':''}$${d.total_pnl}`);})} busy={busy.backtest} style={{fontSize:10}}>⏪ Backtest starten</Btn>
+        <span style={{fontSize:9,color:C.dim}}>200 Kerzen · {cfg.forex_interval||'5min'} · {cfg.forex_default_duration||3}min Trades</span>
+      </div>
+      {backtest?.ok&&<div style={{padding:'8px 10px',background:backtest.profitable?`${C.green}08`:`${C.red}08`,borderRadius:6,border:`1px solid ${backtest.profitable?C.green:C.red}44`,fontSize:10,...mono}}>
+        <div style={{fontSize:11,fontWeight:600,marginBottom:4,color:backtest.profitable?C.green:C.red}}>
+          {backtest.profitable?'✅ PROFITABEL':'❌ NICHT PROFITABEL'} — {backtest.symbol} {backtest.interval}
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:4,marginBottom:4}}>
+          <span>Trades: <strong>{backtest.total_trades}</strong> ({backtest.wins}✓/{backtest.losses}✗/{backtest.draws}−)</span>
+          <span>Win Rate: <strong style={{color:backtest.win_rate>=backtest.break_even_wr?C.green:C.red}}>{backtest.win_rate}%</strong> (Break-even: {backtest.break_even_wr}%)</span>
+          <span>95%-CI: <strong>{backtest.wr_ci_lower}–{backtest.wr_ci_upper}%</strong></span>
+          <span>Max Drawdown: <strong style={{color:backtest.max_drawdown_pct>20?C.red:C.amber}}>{backtest.max_drawdown_pct}%</strong></span>
+          <span>Start: <strong>${backtest.starting_bankroll}</strong></span>
+          <span>Ende: <strong style={{color:backtest.profitable?C.green:C.red}}>${backtest.final_bankroll}</strong></span>
+          <span style={{gridColumn:'1 / -1'}}>P&L: <strong style={{color:backtest.profitable?C.green:C.red}}>{backtest.total_pnl>=0?'+':''}${backtest.total_pnl}</strong></span>
+        </div>
+        <div style={{fontSize:9,color:C.muted,fontStyle:'italic'}}>Strategie: {backtest.strategy}</div>
+        {backtest.wr_ci_upper<backtest.break_even_wr&&<div style={{color:C.red,marginTop:4,fontSize:10}}>⚠ Obere CI-Grenze unter Break-even — statistisch signifikant unprofitabel.</div>}
+        {backtest.total_trades<30&&<div style={{color:C.amber,marginTop:4,fontSize:10}}>⚠ Nur {backtest.total_trades} Trades — statistisch schwach. Mehr Kerzen verwenden.</div>}
+      </div>}
+      {backtest&&!backtest.ok&&<div style={{color:C.red,fontSize:10}}>❌ {backtest.error}</div>}
+      {!backtest&&<div style={{fontSize:10,color:C.muted}}>Klicke "Backtest starten" um die Strategie auf den letzten ~17h historischen Daten zu prüfen.</div>}
     </Card>
 
     {/* Raw Scan (for advanced users) */}
@@ -180,12 +353,12 @@ function ForexDashboard({cfg,apiFetch,act,busy,setMsg,forexSignals,setForexSigna
             <div>
               <span style={{fontSize:14,fontWeight:600}}>{sig.symbol}</span>
               <span style={{fontSize:11,...mono,color:C.muted,marginLeft:8}}>{sig.current_price?.toFixed(5)}</span>
-              <span style={{fontSize:10,marginLeft:6,color:sig.price_change_pct>0?C.green:sig.price_change_pct<0?C.red:C.muted}}>{sig.price_change_pct>0?'+':''}{sig.price_change_pct?.toFixed(3)}%</span>
+              <span style={{fontSize:10,marginLeft:6,color:sig.price_change_pct>0?C.green:sig.price_change_pct<0?C.red:C.muted}}>{sig.price_change_pct&&sig.price_change_pct>0?'+':''}{sig.price_change_pct?.toFixed(3)}%</span>
             </div>
             <div style={{display:'flex',alignItems:'center',gap:4}}>
               {strengthEmoji}
               <span style={{fontSize:13,fontWeight:700,color:dirColor,...mono}}>{sig.direction==='CALL'?'↑ CALL':sig.direction==='PUT'?'↓ PUT':'— WAIT'}</span>
-              <span style={{fontSize:10,...mono,color:C.muted}}>({(sig.confidence*100).toFixed(0)}%)</span>
+              <span style={{fontSize:10,...mono,color:C.muted}}>({sig.confidence!=null?(sig.confidence*100).toFixed(0):'?'}%)</span>
             </div>
           </div>
 
@@ -200,7 +373,7 @@ function ForexDashboard({cfg,apiFetch,act,busy,setMsg,forexSignals,setForexSigna
             <div style={{display:'flex',flexWrap:'wrap',gap:4,marginBottom:4}}>
               {Object.entries(sig.indicators||{}).map(([name,ind])=>{
                 const sc=ind.score>0.3?C.green:ind.score<-0.3?C.red:C.muted;
-                return <div key={name} style={{fontSize:9,padding:'2px 6px',borderRadius:5,background:`${sc}12`,color:sc,...mono}}>{name.toUpperCase()}:{ind.score>0?'+':''}{ind.score.toFixed(1)}</div>;
+                return <div key={name} style={{fontSize:9,padding:'2px 6px',borderRadius:5,background:`${sc}12`,color:sc,...mono}}>{name.toUpperCase()}:{ind.score>0?'+':''}{ind.score?.toFixed(1)||'0'}</div>;
               })}
             </div>
             <div style={{fontSize:10,color:C.muted,...mono}}>
@@ -217,6 +390,7 @@ function ForexDashboard({cfg,apiFetch,act,busy,setMsg,forexSignals,setForexSigna
               <Btn onClick={()=>act('fxCall'+i,async()=>{await doTrade(sig.symbol,'CALL',sig);refresh();})} busy={busy['fxCall'+i]} style={{background:`${C.green}22`,color:C.green,border:`1px solid ${C.green}44`}}>📈 CALL ${amt} für {dur}min</Btn>
               <Btn onClick={()=>act('fxPut'+i,async()=>{await doTrade(sig.symbol,'PUT',sig);refresh();})} busy={busy['fxPut'+i]} style={{background:`${C.red}22`,color:C.red,border:`1px solid ${C.red}44`}}>📉 PUT ${amt} für {dur}min</Btn>
               <Btn onClick={()=>act('fxLlm'+i,async()=>{await askLlm(sig,i);})} busy={busy['fxLlm'+i]} style={{background:`${C.purple}22`,color:C.purple,border:`1px solid ${C.purple}44`}}>🤖 KI fragen</Btn>
+              <Btn onClick={()=>act('fxPlan2'+i,async()=>{await createPlan(sig);})} busy={busy['fxPlan2'+i]} style={{background:`${C.cyan}22`,color:C.cyan,border:`1px solid ${C.cyan}44`}}>📝 Plan</Btn>
             </div>
 
             {/* LLM Opinion Result */}
@@ -273,6 +447,114 @@ function ForexTradeList({apiFetch,C,mono,fmt}){
       <span style={{color:t.result==='WIN'?C.green:C.red,fontWeight:600}}>{t.result==='WIN'?`+$${fmt(t.pnl,2)}`:`-$${fmt(Math.abs(t.pnl),2)}`}</span>
     </div>
   </div>)}</div>;
+}
+
+// ═══ LEARNING TAB ═══
+function LearningTab({apiFetch,act,busy,setMsg,C,mono,fmt,Btn,Card,Metric}){
+  const [data,setData]=React.useState(null);
+  const refresh=React.useCallback(async()=>{try{const r=await apiFetch('/api/learning/status');const d=await r.json();setData(d);}catch{}},[apiFetch]);
+  React.useEffect(()=>{refresh();},[refresh]);
+  const pm=data?.pm_accuracy||{};
+  const fx=data?.forex_signal_accuracy||{};
+  const sources=data?.source_ranking||[];
+
+  return<div>
+    <Card title="🧠 Selbstlernendes System" help="Der Bot lernt aus ALLEM — auch wenn er nicht tradet. Er beobachtet Marktausgänge, trackt Signal-Genauigkeit, und bewertet Quellen-Zuverlässigkeit. Diese Daten fließen automatisch in die nächste Vorhersage ein.">
+      <div style={{display:'flex',gap:6,marginBottom:12}}>
+        <Btn onClick={()=>act('learnRun',async()=>{const r=await apiFetch('/api/learning/run',{method:'POST'});const d=await r.json();setMsg(`✅ Learning: ${d.observations||0} PM-Outcomes, ${d.forex_resolved||0} Forex-Signale, ${d.source_updates||0} Quellen bewertet`);refresh();})} busy={busy.learnRun}>🔄 Learning Zyklus jetzt</Btn>
+      </div>
+      <div style={{fontSize:11,color:C.muted,lineHeight:1.6,marginBottom:10}}>
+        Alle 2 Minuten analysiert der Bot automatisch:<br/>
+        • Sind vorhergesagte Märkte ausgelaufen? → War die Vorhersage richtig?<br/>
+        • Waren Forex-Signale korrekt? → Auch OHNE zu traden<br/>
+        • Welche Nachrichtenquellen liefern zuverlässige Vorhersagen?<br/>
+        • Ergebnisse fließen in den nächsten LLM-Prompt ein
+      </div>
+    </Card>
+
+    {/* PM Prediction Accuracy */}
+    <Card title={`📊 Prediction Market Genauigkeit ${pm.ready?`(${pm.total_observations} Outcomes)`:''}`} help="Alle Vorhersagen vs. tatsächliche Markt-Ergebnisse — auch für Märkte die NICHT getradet wurden.">
+      {pm.ready?<>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:10}}>
+          <Metric label="Genauigkeit" value={`${pm.accuracy_pct}%`} good={pm.accuracy_pct>=55}/>
+          <Metric label="Beobachtet" value={pm.total_observations}/>
+          <Metric label="Getradet" value={pm.traded_count}/>
+          <Metric label="Verpasst" value={pm.missed_winners||0} good={!pm.missed_winners} help="Trades die profitabel gewesen wären, aber nicht genommen wurden"/>
+        </div>
+        {pm.insights?.map((ins,i)=><div key={i} style={{fontSize:10,...mono,color:ins.includes('✅')?C.green:ins.includes('❌')?C.red:C.muted,marginBottom:2}}>{ins}</div>)}
+      </>:<div style={{color:C.muted,fontSize:11}}>Noch nicht genug Daten. Mindestens 3 ausgelaufene Märkte nötig (aktuell: {pm.count||0}).</div>}
+    </Card>
+
+    {/* Forex Signal Accuracy */}
+    <Card title={`📈 Forex Signal Genauigkeit ${fx.ready?`(${fx.total_signals} Signale)`:''}`} help="Wie oft waren die technischen Signale korrekt — auch OHNE zu traden? Wird nach 5 Minuten geprüft.">
+      {fx.ready?<>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:10}}>
+          <Metric label="Genauigkeit" value={`${fx.accuracy_pct}%`} good={fx.accuracy_pct>=54} target="≥54%"/>
+          <Metric label="Korrekt" value={fx.correct}/>
+          <Metric label="Falsch" value={fx.wrong}/>
+        </div>
+        {fx.insights?.map((ins,i)=><div key={i} style={{fontSize:10,...mono,color:ins.includes('✅')?C.green:ins.includes('❌')?C.red:C.muted,marginBottom:2}}>{ins}</div>)}
+      </>:<div style={{color:C.muted,fontSize:11}}>Noch nicht genug Daten. Mindestens 5 Forex-Signale mit 5min Wartezeit nötig (aktuell: {fx.count||0}).</div>}
+    </Card>
+
+    {/* Source Ranking */}
+    <Card title={`📰 Quellen-Ranking (${sources.length} bewertet)`} help="Automatisches Ranking: welche Nachrichtenquellen führen zu korrekten Vorhersagen? A=sehr gut, D=schlecht. Gelernte Scores werden automatisch in der nächsten Research-Runde verwendet — gute Quellen bekommen mehr Gewicht!">
+      {sources.length>0?<div>
+        {sources.map((s,i)=><div key={i} style={{display:'flex',justifyContent:'space-between',padding:'3px 0',borderBottom:`1px solid ${C.border}11`,fontSize:11,...mono}}>
+          <div style={{display:'flex',gap:6,alignItems:'center'}}>
+            <span style={{fontSize:12,fontWeight:700,color:s.grade==='A'?C.green:s.grade==='B'?C.cyan:s.grade==='C'?C.amber:C.red,width:18}}>{s.grade}</span>
+            <span>{s.domain}</span>
+          </div>
+          <span style={{color:s.credibility>=0.55?C.green:C.red}}>{(s.credibility*100).toFixed(0)}% korrekt ({s.total}×)</span>
+        </div>)}
+        <div style={{fontSize:9,color:C.dim,marginTop:4}}>💡 Diese Scores fließen automatisch in die nächste Research-Runde ein. Quellen mit Grade A bekommen mehr Gewicht, Grade D weniger.</div>
+      </div>:<div style={{color:C.muted,fontSize:11}}>Noch nicht genug Daten. Quellen werden nach 5+ Outcomes bewertet.</div>}
+    </Card>
+
+    {/* News Impact Learning */}
+    {data?.news_impact?.ready&&<Card title="📰 News-Einfluss auf Trades" help="Der Bot trackt bei jedem abgeschlossenen Forex-Trade welche News aktiv waren. So lernt er ob News wirklich prädiktiv sind.">
+      <div style={{fontSize:11,color:C.muted,marginBottom:6}}>Basierend auf {data.news_impact.total} Trades mit News-Kontext:</div>
+      {data.news_impact.insights?.map((ins,i)=><div key={i} style={{fontSize:10,...mono,color:ins.includes('zuverlässig')||ins.includes('Top')?C.green:ins.includes('unzuverlässig')||ins.includes('schlecht')?C.red:C.muted,marginBottom:2}}>{ins}</div>)}
+    </Card>}
+
+    {/* Memory Overview */}
+    <Card title="💾 Gedächtnis-Übersicht" help="Wie viel Daten der Bot aktuell gespeichert hat. Alte Daten werden automatisch gekürzt.">
+      <div style={{display:'flex',flexWrap:'wrap',gap:10,fontSize:10,...mono}}>
+        <span>📈 Forex-Signale: <span style={{color:C.cyan}}>{data?.signal_log_count||0}/300</span></span>
+        <span>🤖 KI-Meinungen: <span style={{color:C.cyan}}>{data?.signal_log_count&&Math.min(200,data.signal_log_count)||0}/200</span></span>
+        <span>📰 News Archiv: <span style={{color:C.cyan}}>{data?.news_history_count||0}/200</span></span>
+        <span>📊 News→Trade Log: <span style={{color:C.cyan}}>{data?.news_trade_log_count||0}/200</span></span>
+      </div>
+    </Card>
+
+    {/* API Quota */}
+    <ApiQuotaCard apiFetch={apiFetch} C={C} mono={mono} Card={Card}/>
+
+    {/* Keyword Discoveries */}
+    {data?.discoveries&&(data.discoveries.new_keywords?.length>0||data.discoveries.bad_keywords?.length>0||data.discoveries.suggested_subreddits?.length>0)&&
+    <Card title="🔍 Automatische Entdeckungen" help="Der Bot analysiert welche Schlüsselwörter in Gewinner- vs Verlierer-Trades vorkommen und schlägt neue Subreddits vor.">
+      {data.discoveries.new_keywords?.length>0&&<div style={{marginBottom:8}}>
+        <div style={{fontSize:11,fontWeight:600,color:C.green,marginBottom:4}}>✅ Gewinner-Keywords (erscheinen häufiger in profitablen Trades)</div>
+        <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
+          {data.discoveries.new_keywords.map((k,i)=><span key={i} style={{fontSize:10,...mono,padding:'2px 8px',borderRadius:5,background:`${C.green}12`,color:C.green}}>"{k.keyword}" ({k.wins}W/{k.losses}L)</span>)}
+        </div>
+      </div>}
+      {data.discoveries.bad_keywords?.length>0&&<div style={{marginBottom:8}}>
+        <div style={{fontSize:11,fontWeight:600,color:C.red,marginBottom:4}}>❌ Verlierer-Keywords (erscheinen häufiger in Verlust-Trades)</div>
+        <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
+          {data.discoveries.bad_keywords.map((k,i)=><span key={i} style={{fontSize:10,...mono,padding:'2px 8px',borderRadius:5,background:`${C.red}12`,color:C.red}}>"{k.keyword}" ({k.wins}W/{k.losses}L)</span>)}
+        </div>
+      </div>}
+      {data.discoveries.suggested_subreddits?.length>0&&<div style={{marginBottom:4}}>
+        <div style={{fontSize:11,fontWeight:600,color:C.cyan,marginBottom:4}}>💡 Vorgeschlagene Subreddits</div>
+        {data.discoveries.suggested_subreddits.map((s,i)=><div key={i} style={{fontSize:10,...mono,color:C.muted,marginBottom:2}}>r/{s.subreddit} — {s.reason}</div>)}
+      </div>}
+      {data.discoveries.log?.length>0&&<div style={{marginTop:8,maxHeight:150,overflow:'auto'}}>
+        <div style={{fontSize:10,fontWeight:600,color:C.dim,marginBottom:3}}>Discovery Log:</div>
+        {data.discoveries.log.map((l,i)=><div key={i} style={{fontSize:9,...mono,color:l.includes('✅')?C.green:l.includes('❌')?C.red:C.cyan,marginBottom:1}}>{l}</div>)}
+      </div>}
+    </Card>}
+  </div>;
 }
 
 // ═══ FOREX PRO TAB ═══
@@ -383,20 +665,60 @@ function ForexProTab({cfg,apiFetch,act,busy,setMsg,proStats,setProStats,proRecs,
   </div>;
 }
 
+function ApiQuotaCard({apiFetch,C,mono,Card}){
+  const [quota,setQuota]=React.useState(null);
+  React.useEffect(()=>{
+    const load=async()=>{try{const r=await apiFetch('/api/quota');const d=await r.json();setQuota(d);}catch{}};
+    load();const t=setInterval(load,30000);return()=>clearInterval(t);
+  },[apiFetch]);
+  const entries=Object.entries(quota||{});
+  if(!entries.length)return null;
+  return<Card title="🔌 API-Quota" help="Tägliche API-Anfragen pro Provider. Reset um Mitternacht UTC. Bei 80% Warnung, bei 100% Stop.">
+    {entries.map(([provider,d])=>{
+      const pct=d.pct||0;
+      const color=d.exhausted?C.red:d.warning?C.amber:C.green;
+      return<div key={provider} style={{marginBottom:8}}>
+        <div style={{display:'flex',justifyContent:'space-between',fontSize:11,...mono,marginBottom:3}}>
+          <span style={{textTransform:'uppercase',fontWeight:600}}>{provider}</span>
+          <span style={{color}}>{d.used||0}/{d.limit||'?'} ({pct}%)</span>
+        </div>
+        <div style={{height:6,background:C.dim,borderRadius:3,overflow:'hidden'}}>
+          <div style={{height:'100%',width:`${Math.min(100,pct)}%`,background:color,borderRadius:3,transition:'width 0.3s'}}/>
+        </div>
+        {d.exhausted&&<div style={{fontSize:9,color:C.red,marginTop:2,...mono}}>⚠ Tageslimit erreicht — Reset um 00:00 UTC</div>}
+        {d.warning&&!d.exhausted&&<div style={{fontSize:9,color:C.amber,marginTop:2,...mono}}>⚠ 80% erreicht — bald Limit</div>}
+      </div>;
+    })}
+  </Card>;
+}
+
 function ForexLearning({apiFetch,C,mono,fmt,Card,Metric}){
   const [data,setData]=React.useState(null);
   React.useEffect(()=>{(async()=>{try{const r=await apiFetch('/api/forex/learning');const d=await r.json();setData(d);}catch{}})();},[apiFetch]);
-  if(!data||!data.ready)return<Card title="🧠 Forex Learning" help="Nach mindestens 3 abgeschlossenen Trades analysiert der Bot welche Paare, Zeitrahmen und Indikatoren am besten funktionieren."><div style={{color:C.muted,fontSize:11,padding:6}}>Noch nicht genug Daten. Mindestens 3 abgeschlossene Trades nötig (aktuell: {data?.current||0}).</div></Card>;
-  return<Card title={`🧠 Forex Learning (${data.total_trades} Trades analysiert)`} help="Der Bot lernt aus jedem Trade: welches Paar, welcher Zeitrahmen, welche Indikatoren gut funktionieren. Diese Daten werden an die KI übergeben wenn du 'KI fragen' klickst.">
-    {/* Insights */}
-    {data.insights.length>0&&<div style={{marginBottom:10,padding:'8px 10px',background:C.bg,borderRadius:6,border:`1px solid ${C.border}`}}>
-      <div style={{fontSize:11,fontWeight:600,marginBottom:4,color:C.text}}>Erkenntnisse:</div>
-      {data.insights.map((insight,i)=><div key={i} style={{fontSize:10,...mono,color:insight.startsWith('✅')?C.green:C.red,marginBottom:2}}>{insight}</div>)}
+  if(!data||!data.ready)return<Card title="🧠 Forex Learning" help="Nach mindestens 3 abgeschlossenen Trades analysiert der Bot alles: Paare, Indikatoren, Kombinationen, Tageszeiten, KI-Genauigkeit."><div style={{color:C.muted,fontSize:11,padding:6}}>Noch nicht genug Daten ({data?.current||0}/3 Trades).</div></Card>;
+  return<Card title={`🧠 Forex Learning (${data.total_trades}T: ${data.binary_trades||0} Binary + ${data.pro_trades||0} Pro)`} help="Komplette Analyse aller Trades. Diese Daten fließen automatisch in den LLM-Prompt bei 'KI fragen'.">
+    {/* Cold Start & Significance Warnings */}
+    {data.cold_start&&<div style={{marginBottom:10,padding:'6px 10px',background:`${C.cyan}10`,borderRadius:6,border:`1px solid ${C.cyan}44`,fontSize:10,...mono,color:C.cyan}}>
+      ❄️ {data.cold_start_msg||'Cold-Start aktiv — Einsätze reduziert.'}
+    </div>}
+    {!data.statistically_significant&&<div style={{marginBottom:10,padding:'6px 10px',background:`${C.amber}10`,borderRadius:6,border:`1px solid ${C.amber}33`,fontSize:10,...mono,color:C.amber}}>
+      ⚠ {data.significance_msg||'Zu wenig Daten für statistische Signifikanz.'}
     </div>}
 
-    {/* By Pair */}
-    {data.by_pair.length>0&&<div style={{marginBottom:8}}>
-      <div style={{fontSize:10,fontWeight:600,color:C.muted,marginBottom:3}}>Pro Währungspaar:</div>
+    {/* Self-Optimization Suggestions */}
+    {data.suggestions?.length>0&&<div style={{marginBottom:10,padding:'8px 10px',background:`${C.amber}08`,borderRadius:6,border:`1px solid ${C.amber}33`}}>
+      <div style={{fontSize:11,fontWeight:600,marginBottom:4,color:C.amber}}>🔧 Selbst-Optimierung:</div>
+      {data.suggestions.map((s,i)=><div key={i} style={{fontSize:10,...mono,color:s.type==='warning'?C.red:s.type==='positive'?C.green:C.cyan,marginBottom:2}}>{s.type==='warning'?'⚠':s.type==='positive'?'✅':'🔧'} {s.msg}</div>)}
+    </div>}
+
+    {/* Insights */}
+    {data.insights?.length>0&&<div style={{marginBottom:10,padding:'8px 10px',background:C.bg,borderRadius:6,border:`1px solid ${C.border}`}}>
+      {data.insights.map((ins,i)=><div key={i} style={{fontSize:10,...mono,color:ins.startsWith('✅')||ins.startsWith('🔥')?C.green:ins.startsWith('❌')||ins.startsWith('❄️')?C.red:C.muted,marginBottom:2}}>{ins}</div>)}
+    </div>}
+
+    {/* Pairs */}
+    {data.by_pair?.length>0&&<div style={{marginBottom:8}}>
+      <div style={{fontSize:10,fontWeight:600,color:C.muted,marginBottom:3}}>Währungspaare:</div>
       <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
         {data.by_pair.map((p,i)=><div key={i} style={{fontSize:10,...mono,padding:'3px 8px',borderRadius:5,background:p.win_rate>=54?`${C.green}12`:`${C.red}12`,color:p.win_rate>=54?C.green:C.red,border:`1px solid ${p.win_rate>=54?C.green:C.red}33`}}>
           {p.pair}: {p.win_rate}% ({p.total}T, {p.pnl>=0?'+':''}${fmt(p.pnl,2)})
@@ -404,34 +726,41 @@ function ForexLearning({apiFetch,C,mono,fmt,Card,Metric}){
       </div>
     </div>}
 
-    {/* By Duration */}
-    {data.by_duration.length>0&&<div style={{marginBottom:8}}>
-      <div style={{fontSize:10,fontWeight:600,color:C.muted,marginBottom:3}}>Pro Dauer:</div>
+    {/* Indicator Combos — NEW */}
+    {data.by_combo?.length>0&&<div style={{marginBottom:8}}>
+      <div style={{fontSize:10,fontWeight:600,color:C.muted,marginBottom:3}}>Indikator-Kombinationen (welche ZUSAMMEN funktionieren):</div>
       <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
-        {data.by_duration.map((d,i)=><div key={i} style={{fontSize:10,...mono,padding:'3px 8px',borderRadius:5,background:d.win_rate>=54?`${C.green}12`:`${C.red}12`,color:d.win_rate>=54?C.green:C.red}}>
-          {d.duration}: {d.win_rate}% ({d.total}T)
+        {data.by_combo.map((c,i)=><div key={i} style={{fontSize:10,...mono,padding:'3px 8px',borderRadius:5,background:c.win_rate>=55?`${C.green}12`:`${C.red}12`,color:c.win_rate>=55?C.green:C.red}}>
+          {c.combo}: {c.win_rate}% ({c.total}T)
         </div>)}
       </div>
     </div>}
 
-    {/* By Indicator */}
-    {data.by_indicator.length>0&&<div style={{marginBottom:8}}>
-      <div style={{fontSize:10,fontWeight:600,color:C.muted,marginBottom:3}}>Indikator-Zuverlässigkeit:</div>
-      <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
-        {data.by_indicator.map((ind,i)=><div key={i} style={{fontSize:10,...mono,padding:'3px 8px',borderRadius:5,background:ind.accuracy>=55?`${C.green}12`:`${C.red}12`,color:ind.accuracy>=55?C.green:C.red}}>
-          {ind.indicator.toUpperCase()}: {ind.accuracy}% korrekt ({ind.total}×)
-        </div>)}
-      </div>
+    {/* Indicators + Duration + Direction in compact form */}
+    <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:8}}>
+      {data.by_indicator?.length>0&&<div style={{flex:'1 1 200px'}}>
+        <div style={{fontSize:10,fontWeight:600,color:C.muted,marginBottom:3}}>Indikatoren:</div>
+        {data.by_indicator.map((ind,i)=><div key={i} style={{fontSize:10,...mono,color:ind.accuracy>=55?C.green:ind.accuracy<45?C.red:C.muted}}>{ind.indicator.toUpperCase()}: {ind.accuracy}% ({ind.total}×)</div>)}
+      </div>}
+      {data.by_duration?.length>0&&<div style={{flex:'1 1 120px'}}>
+        <div style={{fontSize:10,fontWeight:600,color:C.muted,marginBottom:3}}>Dauer:</div>
+        {data.by_duration.map((d,i)=><div key={i} style={{fontSize:10,...mono,color:d.win_rate>=54?C.green:C.red}}>{d.duration}: {d.win_rate}%</div>)}
+      </div>}
+      {data.by_direction?.length>0&&<div style={{flex:'1 1 120px'}}>
+        <div style={{fontSize:10,fontWeight:600,color:C.muted,marginBottom:3}}>Richtung:</div>
+        {data.by_direction.map((d,i)=><div key={i} style={{fontSize:10,...mono,color:d.win_rate>=54?C.green:C.red}}>{d.direction}: {d.win_rate}% ({d.total}T)</div>)}
+      </div>}
+    </div>
+
+    {/* LLM Tracking — NEW */}
+    {data.llm_tracking?.total>=1&&<div style={{fontSize:10,...mono,padding:'4px 8px',borderRadius:4,marginBottom:4,background:data.llm_tracking.accuracy>=50?`${C.green}08`:`${C.red}08`}}>
+      🤖 KI-Genauigkeit: {data.llm_tracking.accuracy!=null?`${data.llm_tracking.accuracy}%`:'?'} ({data.llm_tracking.correct}✓ / {data.llm_tracking.wrong}✗ in {data.llm_tracking.total} Meinungen)
+      {data.llm_tracking.accuracy!=null&&data.llm_tracking.accuracy<50&&<span style={{color:C.red}}> — KI liegt öfter FALSCH als richtig!</span>}
     </div>}
 
-    {/* By Direction */}
-    {data.by_direction.length>0&&<div style={{marginBottom:4}}>
-      <div style={{fontSize:10,fontWeight:600,color:C.muted,marginBottom:3}}>CALL vs PUT:</div>
-      <div style={{display:'flex',gap:8}}>
-        {data.by_direction.map((d,i)=><div key={i} style={{fontSize:10,...mono,color:d.win_rate>=54?C.green:C.red}}>
-          {d.direction}: {d.win_rate}% WR ({d.total}T, {d.pnl>=0?'+':''}${fmt(d.pnl,2)})
-        </div>)}
-      </div>
+    {/* Streak */}
+    {data.streak?.count>=2&&<div style={{fontSize:10,...mono,color:data.streak.type==='WIN'?C.green:C.red,marginBottom:4}}>
+      {data.streak.type==='WIN'?'🔥':'❄️'} {data.streak.count}er {data.streak.type}-Serie {data.streak.type==='LOSS'&&data.streak.count>=3?' — Einsatz reduzieren!':''}
     </div>}
   </Card>;
 }
@@ -459,8 +788,8 @@ function SettingRow({item,value,onChange}){
   </div>;
 }
 
-const TABS=['pipeline','maerkte','ergebnisse','risk','forex','forexpro','settings','log'];
-const TL={pipeline:'🚀 Pipeline',maerkte:'🏪 Märkte',ergebnisse:'📊 Ergebnisse',risk:'🛡️ Risk',forex:'📈 Binary',forexpro:'💹 Forex Pro',settings:'⚙️ Einstellungen',log:'📋 Log'};
+const TABS=['pipeline','maerkte','ergebnisse','risk','forex','forexpro','learning','settings','log'];
+const TL={pipeline:'🚀 Pipeline',maerkte:'🏪 Märkte',ergebnisse:'📊 Ergebnisse',risk:'🛡️ Risk',forex:'📈 Binary',forexpro:'💹 Forex Pro',learning:'🧠 Learning',settings:'⚙️ Einstellungen',log:'📋 Log'};
 
 export default function App(){
   const [tab,setTab]=useState('pipeline');
@@ -493,6 +822,9 @@ export default function App(){
   const [forexSignals,setForexSignals]=useState([]);
   const [proStats,setProStats]=useState(null);
   const [proRecs,setProRecs]=useState(null);
+  const [newsDigest,setNewsDigest]=useState(null);
+  const [llmPrompts,setLlmPrompts]=useState(null);
+  const [selectedPrompt,setSelectedPrompt]=useState(null);
 
   const apiFetch=useCallback(async(path,opts={})=>{const h={...(opts.headers||{})};if(uiPw)h['x-ui-password']=uiPw;return fetch(path,{...opts,headers:h});},[uiPw]);
   const apiJson=useCallback(async(path,fb=null)=>{try{const r=await apiFetch(path);if(!r.ok)throw 0;return await r.json();}catch{return fb;}},[apiFetch]);
@@ -1088,6 +1420,11 @@ export default function App(){
       {tab==='forexpro'&&<ForexProTab cfg={cfg} apiFetch={apiFetch} act={act} busy={busy} setMsg={setMsg} proStats={proStats} setProStats={setProStats} proRecs={proRecs} setProRecs={setProRecs} C={C} mono={mono} fmt={fmt} Btn={Btn} Card={Card} Metric={Metric}/>}
 
       {/* ═══════════════════════════════════════════ */}
+      {/* TAB: LEARNING                               */}
+      {/* ═══════════════════════════════════════════ */}
+      {tab==='learning'&&<LearningTab apiFetch={apiFetch} act={act} busy={busy} setMsg={setMsg} C={C} mono={mono} fmt={fmt} Btn={Btn} Card={Card} Metric={Metric}/>}
+
+      {/* ═══════════════════════════════════════════ */}
       {/* TAB: EINSTELLUNGEN                          */}
       {/* ═══════════════════════════════════════════ */}
       {tab==='settings'&&<div>
@@ -1217,6 +1554,10 @@ export default function App(){
               {key:'forex_auto_enabled',label:'Auto-Trading',rec:false,desc:'Bot handelt automatisch basierend auf Signalen.',why:'Erst AN nach 20+ manuellen Trades mit guter Win Rate.',type:'bool'},
               {key:'forex_auto_interval_min',label:'Auto-Intervall (Min)',rec:5,desc:'Wie oft der Bot nach Signalen sucht.',why:'5 Min = moderate Frequenz. 1 Min verbraucht viele API-Requests.'},
               {key:'forex_auto_min_score',label:'Auto Min Score',rec:0.5,desc:'Minimaler Score damit der Bot automatisch handelt.',why:'0.5 = nur bei starken Signalen. 0.3 = auch bei schwächeren.'},
+              {key:'forex_simulate_spread',label:'Spread simulieren',rec:true,desc:'Zieht pro Trade 1-2 Pips vom Preis ab — realistischer als Paper-Trading ohne Kosten.',why:'Echte Broker haben Spread. Für ehrliche Paper-Ergebnisse einschalten.',type:'bool'},
+              {key:'forex_spread_pips',label:'Spread (Pips)',rec:1.5,desc:'Wie viele Pips der Broker pro Trade nimmt.',why:'EUR/USD: 1-2 Pips. Exotische Paare: 3-5 Pips.'},
+              {key:'forex_slippage_pips',label:'Slippage (Pips)',rec:0.5,desc:'Zusätzliche Kosten durch Latenz beim Öffnen.',why:'0.5-1 Pip ist realistisch für schnelle Broker.'},
+              {key:'forex_correlation_check',label:'Korrelations-Check (Pro)',rec:true,desc:'Blockiert Pro-Trades die deine Währungs-Exposure verdoppeln (z.B. EUR/USD CALL + EUR/GBP CALL).',why:'Verhindert verstecktes Doppel-Risiko auf eine Währung.',type:'bool'},
             ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
           </Card>
           <Card title="💹 Forex Pro (SL/TP)" help="Realistisches Trading mit Stop-Loss und Take-Profit.">
@@ -1228,9 +1569,12 @@ export default function App(){
             ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
           </Card>
           {/* System */}
-          <Card title="🔧 System" help="Logging und sonstige Einstellungen.">
+          <Card title="🔧 System" help="Logging, Rate Limiting und Sicherheits-Einstellungen.">
             {[{key:'log_to_file',label:'Log in Datei',rec:true,desc:'Logs in tägliche Dateien schreiben.',why:'Wichtig für Debugging.',type:'bool'},
               {key:'log_retention_days',label:'Log Aufbewahrung (Tage)',rec:14,desc:'Wie lange Log-Dateien behalten werden.',why:'14 Tage reicht. Ältere werden gelöscht.'},
+              {key:'rate_limit_enabled',label:'Rate Limiting aktivieren',rec:false,desc:'Begrenze Anzahl Anfragen pro IP pro Minute. Schutz gegen DoS wenn VPS öffentlich erreichbar ist.',why:'Standardmäßig AUS. Aktivieren wenn dein Dashboard öffentlich im Internet erreichbar ist.',type:'bool'},
+              {key:'rate_limit_per_minute',label:'Max Anfragen/Min pro IP',rec:60,desc:'Wie viele API-Anfragen pro Minute pro IP-Adresse erlaubt sind.',why:'60/Min = 1/Sekunde. Erhöhen wenn du selbst oft refreshst.'},
+              {key:'llm_log_prompts',label:'LLM Prompts loggen',rec:true,desc:'Speichere alle an LLMs gesendeten Prompts zum Debuggen.',why:'Essentiell um zu verstehen was die KI bekommt. AUS = kein Log im Log-Tab.',type:'bool'},
             ].map(s=><SettingRow key={s.key} item={s} value={cfg[s.key]} onChange={v=>setConfig(s.key,v)}/>)}
           </Card>
         </div>
@@ -1256,6 +1600,60 @@ export default function App(){
             Aktuell: <strong style={{color:Number(nightlyStatus?.brier_score??1)<0.25?C.green:C.red}}>{nightlyStatus?.brier_score!=null?nightlyStatus.brier_score:'Noch keine Daten'}</strong> über {nightlyStatus?.brier_samples||0} Outcomes.<br/>
             <span style={{fontSize:11,color:C.dim}}>Outcomes werden erfasst wenn Märkte auslaufen. Mehr Samples = zuverlässigerer Score.</span>
           </div>
+        </Card>
+
+        {/* LLM Prompt Log — see exactly what was sent to each LLM */}
+        <Card title="🤖 LLM Prompt Log" help="Zeigt die letzten Anfragen an die LLMs. Klicke auf einen Eintrag um den kompletten Prompt zu sehen. Siehst genau was die KI bekommen hat und was sie geantwortet hat.">
+          <Btn onClick={()=>act('llmLog',async()=>{const r=await apiFetch('/api/llm/prompts?limit=30');const d=await r.json();setLlmPrompts(d);setMsg(`🤖 ${d.total} LLM-Anfragen im Log`);})} busy={busy.llmLog} style={{marginBottom:8,fontSize:10}}>🤖 Prompts laden</Btn>
+          {llmPrompts?.items?.length>0&&<div>
+            <div style={{maxHeight:200,overflow:'auto',marginBottom:6}}>
+              {llmPrompts.items.map((p,i)=><div key={i} onClick={()=>setSelectedPrompt(p)} style={{padding:'4px 6px',borderBottom:`1px solid ${C.border}11`,fontSize:10,...mono,cursor:'pointer',background:selectedPrompt===p?`${C.cyan}15`:'transparent'}}>
+                <div style={{display:'flex',justifyContent:'space-between'}}>
+                  <span><span style={{color:p.success?C.green:C.red}}>{p.success?'✓':p.success===false?'✗':'…'}</span> <span style={{color:C.cyan,marginLeft:4}}>{p.provider}</span> <span style={{color:C.muted,marginLeft:4}}>{p.model?.slice(0,30)}</span></span>
+                  <span style={{color:C.dim}}>{p.prompt_tokens_est}tok · {p.duration_ms?p.duration_ms+'ms':'...'} · {new Date(p.time).toLocaleTimeString('de-DE')}</span>
+                </div>
+                <div style={{color:C.muted,marginTop:1}}>{p.prompt_preview?.slice(0,90)}...</div>
+              </div>)}
+            </div>
+            {selectedPrompt&&<div style={{padding:'8px 10px',background:C.bg,borderRadius:6,border:`1px solid ${C.border}`}}>
+              <div style={{fontSize:10,...mono,color:C.cyan,marginBottom:4}}>
+                📝 {selectedPrompt.provider} · {selectedPrompt.model} · {selectedPrompt.prompt_length_chars} chars · ~{selectedPrompt.prompt_tokens_est} tokens
+              </div>
+              <div style={{fontSize:10,...mono,color:C.text,whiteSpace:'pre-wrap',maxHeight:400,overflow:'auto',padding:8,background:C.card,borderRadius:4,border:`1px solid ${C.border}`}}>
+                {selectedPrompt.prompt_full}
+              </div>
+              {selectedPrompt.response_preview&&<div style={{marginTop:6}}>
+                <div style={{fontSize:10,...mono,color:C.green,marginBottom:2}}>💬 Response:</div>
+                <div style={{fontSize:10,...mono,color:C.muted,padding:6,background:C.card,borderRadius:4,maxHeight:150,overflow:'auto',border:`1px solid ${C.border}`}}>{selectedPrompt.response_preview}</div>
+              </div>}
+            </div>}
+          </div>}
+          {!llmPrompts&&<div style={{color:C.muted,fontSize:11}}>Klicke "Prompts laden" um alle letzten LLM-Anfragen zu sehen.</div>}
+        </Card>
+
+        {/* News Digest — was wurde als wichtig erkannt */}
+        <Card title="📰 News Digest" help="Zeigt welche Nachrichten der Bot als relevant für die Märkte erkannt hat. Jede Headline wird mit Sentiment (↑ bullish / ↓ bearish) und Quelle angezeigt. Grün = vertrauenswürdige Quelle, Grau = weniger vertrauenswürdig.">
+          <Btn onClick={()=>act('newsDigest',async()=>{const r=await apiFetch('/api/news/digest');const d=await r.json();setNewsDigest(d);setMsg(`📰 ${d.items?.length||0} wichtige Headlines von ${d.total_fetched||0} gescannt`);})} busy={busy.newsDigest} style={{marginBottom:8,fontSize:10}}>📰 News laden</Btn>
+          {newsDigest?.items?.length>0&&<div style={{maxHeight:350,overflow:'auto'}}>
+            <div style={{fontSize:10,...mono,color:C.dim,marginBottom:6}}>
+              {newsDigest.total_fetched} Headlines gescannt → {newsDigest.important} als relevant erkannt ({newsDigest.time?.slice(0,16)})
+            </div>
+            {newsDigest.items.map((n,i)=><div key={i} style={{padding:'4px 0',borderBottom:`1px solid ${C.border}11`,fontSize:10,...mono}}>
+              <div style={{display:'flex',gap:6,alignItems:'flex-start'}}>
+                <span style={{color:n.sentiment==='bullish'?C.green:n.sentiment==='bearish'?C.red:C.muted,fontSize:11,flexShrink:0}}>{n.sentiment==='bullish'?'↑':n.sentiment==='bearish'?'↓':'→'}</span>
+                <div style={{flex:1}}>
+                  <span style={{color:C.text}}>{n.title}</span>
+                  <div style={{display:'flex',gap:8,marginTop:1}}>
+                    <span style={{color:n.credibility>=0.7?C.green:n.credibility>=0.5?C.cyan:C.dim}}>{n.domain||n.source}</span>
+                    {n.published&&<span style={{color:C.dim}}>{new Date(n.published).toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</span>}
+                    {n.matched_markets?.length>0&&<span style={{color:C.amber}}>→ {n.matched_markets[0]}</span>}
+                  </div>
+                </div>
+              </div>
+            </div>)}
+          </div>}
+          {newsDigest&&!newsDigest.items?.length&&<div style={{color:C.muted,fontSize:11}}>Keine relevanten Headlines gefunden. Starte erst einen Research-Lauf.</div>}
+          {!newsDigest&&<div style={{color:C.muted,fontSize:11}}>Klicke "📰 News laden" um den Digest zu sehen.</div>}
         </Card>
 
         {/* Compound Status */}
